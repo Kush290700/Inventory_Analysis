@@ -1,5 +1,3 @@
-# tabs/kpis.py
-
 import io
 import streamlit as st
 import altair as alt
@@ -8,28 +6,15 @@ import numpy as np
 
 def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     """
-    📈 Advanced Inventory KPIs & Insights
+    📈 Advanced Inventory KPIs & Insights (no filters)
     """
     st.header("📈 Inventory Management Dashboard")
-
-    # ─── Sidebar Filters ────────────────────────────────────────
-    st.sidebar.subheader("KPI Filters")
-    sup_opts  = sorted(df.get("Supplier", pd.Series()).dropna().unique())
-    prot_opts = sorted(df.get("Protein",  pd.Series()).dropna().unique())
-    sel_sups  = st.sidebar.multiselect("Supplier", sup_opts,  default=sup_opts)
-    sel_prots = st.sidebar.multiselect("Protein",  prot_opts, default=prot_opts)
-
-    df = df[
-        df.get("Supplier", pd.Series()).isin(sel_sups) &
-        df.get("Protein",  pd.Series()).isin(sel_prots)
-    ].copy()
-    df_hc = df_hc[df_hc.get("SKU", pd.Series()).isin(df.get("SKU", pd.Series()))].copy()
 
     # ─── Core KPI computations ──────────────────────────────────
     weeks     = df.get("WeeksOnHand",     pd.Series(dtype=float))
     turns     = df.get("AnnualTurns",     pd.Series(dtype=float))
-    weight_lb = df.get("OnHandWeightTotal",  pd.Series(dtype=float))
-    cost      = df.get("OnHandCostTotal",      pd.Series(dtype=float))
+    weight_lb = df.get("OnHandWeightTotal", pd.Series(dtype=float))
+    cost      = df.get("OnHandCostTotal",   pd.Series(dtype=float))
     skus      = df.get("SKU",             pd.Series(dtype=object))
 
     total_skus = skus.nunique()
@@ -76,19 +61,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
 
     st.markdown("---")
 
-    # ─── 1) Helper to group tiny slices into “Other” ────────────────
-    def squash_minor(df, pct_col='Pct', label_col='Protein', threshold=0.05):
-        df2 = df.copy()
-        df2['Category'] = np.where(df2[pct_col] < threshold, 'Other', df2[label_col])
-        out = (
-            df2
-            .groupby('Category', as_index=False)
-            .agg(Count=('Count','sum'))
-        )
-        out['Pct'] = out.Count / out.Count.sum()
-        return out
-
-    # ─── 3) At-Risk vs Healthy Donut ────────────────────────────────
+    # ─── At-Risk vs Healthy Donut ────────────────────────────────
     risk_df = pd.DataFrame({
         "Status": ["At-Risk", "Healthy"],
         "Count":  [at_risk, healthy]
@@ -101,44 +74,29 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         .mark_arc(innerRadius=60, outerRadius=100, stroke='#fff', strokeWidth=2)
         .encode(
             theta=alt.Theta("Count:Q", title=None),
-            color=alt.Color("Status:N",
-                            scale=alt.Scale(domain=["At-Risk","Healthy"],
-                                            range=["#d62728","#2ca02c"]),
-                            title="Status"),
-            tooltip=[
-                alt.Tooltip("Status:N"),
-                alt.Tooltip("Count:Q", format=",d"),
-                alt.Tooltip("Pct:Q", format=".1%")
-            ]
+            color=alt.Color("Status:N", scale=alt.Scale(domain=["At-Risk","Healthy"], range=["#d62728","#2ca02c"])),
+            tooltip=[alt.Tooltip("Status:N"), alt.Tooltip("Count:Q", format=",d"), alt.Tooltip("Pct:Q", format=".1%")]  
         )
-        .properties(width=300, height=300)
+        .properties(width=500, height=500)
     )
-
     center_text = (
         alt.Chart(pd.DataFrame([{}]))
         .mark_text(size=20, align='center', baseline='middle')
-        .encode(
-            text=alt.value(f"At-Risk\n{risk_pct:.1%}")
-        )
-        .properties(width=300, height=300)
+        .encode(text=alt.value(f"At-Risk\n{risk_pct:.1%}"))
+        .properties(width=500, height=500)
     )
-
-    risk_chart = alt.layer(donut, center_text).properties(
-        title="At-Risk vs Healthy SKUs"
-    )
-
-    st.altair_chart(theme(risk_chart), use_container_width=False)
+    st.altair_chart(theme(alt.layer(donut, center_text).properties(title="At-Risk vs Healthy SKUs")), use_container_width=False)
 
     st.markdown("---")
 
-    # ─── Holding-Cost Distribution ────────────────────────────
+    # ─── Holding-Cost % Distribution ─────────────────────────────
     st.subheader("Holding-Cost % Distribution")
     if "HoldingCostPercent" in df_hc.columns:
         hc_dist = (
             alt.Chart(df_hc)
             .transform_density("HoldingCostPercent", as_=["HC","Density"], bandwidth=0.5)
             .mark_area(color="orange", opacity=0.3)
-            .encode(x="HC:Q", y="Density:Q", tooltip=[alt.Tooltip("Density:Q")])
+            .encode(x="HC:Q", y="Density:Q")
         )
         hc_hist = (
             alt.Chart(df_hc)
@@ -148,19 +106,15 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
                 y=alt.Y("count():Q", title="Count of SKUs")
             )
         )
-        combined = (hc_hist + hc_dist).properties(height=300).interactive()
-        st.altair_chart(theme(combined), use_container_width=True)
+        st.altair_chart(theme((hc_hist + hc_dist).properties(height=300).interactive()), use_container_width=True)
     else:
         st.info("No HoldingCostPercent column found.")
 
-    # ─── Top-5 SKUs by Holding Cost ───────────────────────────
     st.subheader("Top-5 SKUs by Holding Cost")
     if "TotalHoldingCost" in df_hc.columns:
         top5 = (
-            df_hc
-            .groupby("SKU_Desc", as_index=False)["TotalHoldingCost"]
-            .sum()
-            .nlargest(5, "TotalHoldingCost")
+            df_hc.groupby("SKU_Desc", as_index=False)["TotalHoldingCost"]
+                 .sum().nlargest(5, "TotalHoldingCost")
         )
         bar_hc = (
             alt.Chart(top5)
