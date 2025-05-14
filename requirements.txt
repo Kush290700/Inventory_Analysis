@@ -8,3 +8,6 @@ numpy>=1.23.0
 # Charting libraries
 altair>=4.2.0
 plotly>=5.15.0
+
+# Excel file support
+openpyxl>=3.0.0
