@@ -61,33 +61,32 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
 
     st.markdown("---")
 
-    # ─── At-Risk vs Healthy Donut ────────────────────────────────
-    risk_df = pd.DataFrame({
-        "Status": ["At-Risk", "Healthy"],
-        "Count":  [at_risk, healthy]
-    })
-    risk_df['Pct'] = risk_df.Count / risk_df.Count.sum()
-    risk_pct = risk_df.loc[risk_df.Status=='At-Risk','Pct'].iloc[0]
-
-    donut = (
-        alt.Chart(risk_df)
-        .mark_arc(innerRadius=60, outerRadius=100, stroke='#fff', strokeWidth=2)
-        .encode(
-            theta=alt.Theta("Count:Q", title=None),
-            color=alt.Color("Status:N", scale=alt.Scale(domain=["At-Risk","Healthy"], range=["#d62728","#2ca02c"])),
-            tooltip=[alt.Tooltip("Status:N"), alt.Tooltip("Count:Q", format=",d"), alt.Tooltip("Pct:Q", format=".1%")]  
+    # ─── At-Risk vs Healthy SKUs ───────────────────────────────────
+    st.subheader("At-Risk vs Healthy SKUs")
+    
+    # Center columns: empty | chart | empty
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        # Draw the donut + center text
+        risk_chart = (
+            alt.layer(donut, center_text)
+            .properties(
+                width=300,
+                height=300,
+                title="At-Risk vs Healthy SKUs"
+            )
+            .configure_title(anchor="middle", fontSize=16)
         )
-        .properties(width=500, height=500)
-    )
-    center_text = (
-        alt.Chart(pd.DataFrame([{}]))
-        .mark_text(size=20, align='center', baseline='middle')
-        .encode(text=alt.value(f"At-Risk\n{risk_pct:.1%}"))
-        .properties(width=500, height=500)
-    )
-    st.altair_chart(theme(alt.layer(donut, center_text).properties(title="At-Risk vs Healthy SKUs")), use_container_width=False)
-
+        st.altair_chart(theme(risk_chart), use_container_width=True)
+    
+        # Add a tiny summary underneath
+        st.markdown(
+            f"**Healthy**: {healthy} SKUs  |  **At-Risk**: {at_risk} SKUs  \n"
+            f"Percentage at risk: **{risk_pct:.1%}**"
+        )
+    
     st.markdown("---")
+
 
     # ─── Holding-Cost % Distribution ─────────────────────────────
     st.subheader("Holding-Cost % Distribution")
