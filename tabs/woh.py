@@ -21,30 +21,38 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     """
     st.header("📊 Weeks-On-Hand Analysis")
 
-    # ── Move FZ → EXT ────────────────────────────────────────────
-    st.subheader("🔄 Move FZ → EXT")
+    # ── Precompute FZ WeeksOnHand lookup ────────────────────────────────────────
+    # take only your “in-freeze” inventory
     fz = df[df["ProductState"].str.upper().str.startswith("FZ")].copy()
     fz["Status"] = np.where(fz["AvgWeeklyUsage"] == 0, "Frozen", "Active")
-
+    
+    # make a Series mapping SKU → FZ WeeksOnHand
+    fz_woh = fz.set_index("SKU")["WeeksOnHand"]
+    
+    # ── Move FZ → EXT ────────────────────────────────────────────
+    st.subheader("🔄 Move FZ → EXT")
+    
     # threshold slider
     thr1 = st.slider(
         "WOH threshold for FZ→EXT",
         0.0, 52.0, 4.0, 0.5,
         key="w2e_thr"
     )
+    
+    # select FZ rows whose own FZ WOH > threshold
     to_move = fz[fz["WeeksOnHand"] > thr1]
-
+    
     # summary metrics
     c1, c2, c3 = st.columns(3)
     c1.metric("SKUs to Move",         to_move["SKU"].nunique())
     c2.metric("Total Weight to Move", f"{to_move['OnHandWeightTotal'].sum():,.0f} lb")
     c3.metric("Total Cost to Move",   f"${to_move['OnHandCostTotal'].sum():,.0f}")
-
+    
     # supplier filter
     suppliers = sorted(to_move["Supplier"].dropna().unique())
     sel_sup   = st.multiselect("Filter Suppliers", suppliers, default=suppliers, key="mv1_sups")
     mv1 = to_move[to_move["Supplier"].isin(sel_sup)]
-
+    
     if mv1.empty:
         st.info("No items match the current filters.")
     else:
@@ -60,7 +68,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
                 tooltip=[
                     alt.Tooltip("SKU_Desc:N", title="SKU"),
                     alt.Tooltip("Supplier:N", title="Supplier"),
-                    alt.Tooltip("WeeksOnHand:Q", title="WOH (weeks)"),
+                    alt.Tooltip("WeeksOnHand:Q", title="FZ WOH (weeks)"),
                     alt.Tooltip("OnHandWeightTotal:Q", title="Weight (lb)"),
                     alt.Tooltip("OnHandCostTotal:Q", title="Cost ($)"),
                     alt.Tooltip("Status:N", title="Status"),
@@ -73,7 +81,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             .interactive()
         )
         st.altair_chart(theme(chart1), use_container_width=True)
-
+    
         buf1 = io.BytesIO()
         mv1.to_excel(buf1, index=False, sheet_name="FZ2EXT")
         buf1.seek(0)
@@ -83,12 +91,17 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             file_name="FZ2EXT.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
+    
     # ── Move EXT → FZ ────────────────────────────────────────────
     st.subheader("🔄 Move EXT → FZ")
+    
+    # grab only EXT-state rows
     ext = df[df["ProductState"].str.upper().str.startswith("EXT")].copy()
     ext["Status"] = np.where(ext["AvgWeeklyUsage"] == 0, "Frozen", "Active")
-
+    
+    # pull in the FZ WOH for each EXT SKU (default to 0 if missing)
+    ext["FZ_WOH"] = ext["SKU"].map(fz_woh).fillna(0)
+    
     # dynamic default threshold
     thr2_default = 1.0
     try:
@@ -96,27 +109,30 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             thr2_default = float(compute_threshold_move(ext, df_hc))
     except:
         pass
-
+    
     thr2 = st.slider(
-        "Return EXT→FZ if WOH <",
-        float(ext["WeeksOnHand"].min()),
-        float(ext["WeeksOnHand"].max()),
+        "Return EXT→FZ if **FZ** WOH <",
+        0.0,
+        float(ext["FZ_WOH"].max()),
         thr2_default,
         step=0.25,
         key="e2f_thr"
     )
-    back = ext[ext["WeeksOnHand"] < thr2]
-
+    
+    # filter based on the FZ-state WOH, not the EXT WOH
+    back = ext[ext["FZ_WOH"] < thr2]
+    
+    # summary metrics
     col1, col2, col3 = st.columns(3)
     col1.metric("SKUs to Return",         back["SKU"].nunique())
     col2.metric("Total Weight to Return", f"{back['OnHandWeightTotal'].sum():,.0f} lb")
     col3.metric("Total Cost to Return",   f"${back['OnHandCostTotal'].sum():,.0f}")
-
+    
+    # supplier filter
     sup2 = sorted(back["Supplier"].dropna().unique())
-    if sup2:
-        chosen2 = st.multiselect("Filter Suppliers", sup2, default=sup2, key="mv2_sups")
-        back    = back[back["Supplier"].isin(chosen2)]
-
+    chosen2 = st.multiselect("Filter Suppliers", sup2, default=sup2, key="mv2_sups")
+    back = back[back["Supplier"].isin(chosen2)]
+    
     if back.empty:
         st.info("No items match the current filters.")
     else:
@@ -130,11 +146,12 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
                 color="Supplier:N",
                 opacity=alt.condition(sel2, alt.value(1), alt.value(0.2)),
                 tooltip=[
-                    "SKU_Desc:N", "Supplier:N",
-                    alt.Tooltip("WeeksOnHand:Q", title="WOH (weeks)"),
+                    alt.Tooltip("SKU_Desc:N", title="SKU"),
+                    alt.Tooltip("Supplier:N", title="Supplier"),
+                    alt.Tooltip("FZ_WOH:Q", title="FZ WOH (weeks)"),
                     alt.Tooltip("OnHandWeightTotal:Q", title="Weight (lb)"),
-                    alt.Tooltip("OnHandCostTotal:Q",   title="Cost ($)"),
-                    "Status:N"
+                    alt.Tooltip("OnHandCostTotal:Q", title="Cost ($)"),
+                    alt.Tooltip("Status:N", title="Status"),
                 ],
                 row=alt.Row("Status:N", title=None, header=alt.Header(labelFontSize=12))
             )
@@ -144,7 +161,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             .interactive()
         )
         st.altair_chart(theme(chart2), use_container_width=True)
-
+    
         buf2 = io.BytesIO()
         back.to_excel(buf2, index=False, sheet_name="EXT2FZ")
         buf2.seek(0)
