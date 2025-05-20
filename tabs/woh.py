@@ -28,58 +28,50 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
     fz["Status"] = np.where(fz["AvgWeeklyUsage"] == 0, "Frozen", "Active")
-    
+
     ext_full = df[
         (df["ProductState"].str.upper().str.startswith("EXT")) &
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
     ext_full["Status"] = np.where(ext_full["AvgWeeklyUsage"] == 0, "Frozen", "Active")
-    
-    # lookup: SKU → FZ metrics
-    fz_woh    = fz.set_index("SKU")["WeeksOnHand"]
-    fz_weight = fz.set_index("SKU")["OnHandWeightTotal"]
-    fz_cost   = fz.set_index("SKU")["OnHandCostTotal"]
-    
-    # lookup: SKU → EXT on-hand
+
+    # lookups
+    fz_woh            = fz.set_index("SKU")["WeeksOnHand"]
+    fz_weight         = fz.set_index("SKU")["OnHandWeightTotal"]
+    fz_cost           = fz.set_index("SKU")["OnHandCostTotal"]
     ext_weight_lookup = ext_full.set_index("SKU")["OnHandWeightTotal"]
     ext_cost_lookup   = ext_full.set_index("SKU")["OnHandCostTotal"]
-    
-    
+
     # ── Move FZ → EXT ────────────────────────────────────────────
     st.subheader("🔄 Move FZ → EXT")
-    
     thr1 = st.slider(
         "Desired FZ WOH (weeks)",
         0.0, 52.0, 4.0, 0.5,
         key="w2e_thr"
     )
-    
+
     to_move = fz[fz["WeeksOnHand"] > thr1].copy()
     to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
     to_move["WeightToMove"]     = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
     to_move["CostToMove"]       = (
         to_move["WeightToMove"] / to_move["OnHandWeightTotal"]
     ) * to_move["OnHandCostTotal"]
-    
-    # map EXT on-hand & compute total
-    to_move["EXT_Weight"]   = to_move["SKU"].map(ext_weight_lookup).fillna(0)
-    to_move["TotalOnHand"]  = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
-    
-    # metrics
-    mv_positive = to_move["WeightToMove"] > 0
-    total_wt_move  = to_move.loc[mv_positive, "WeightToMove"].sum()
+    to_move["EXT_Weight"]       = to_move["SKU"].map(ext_weight_lookup).fillna(0)
+    to_move["TotalOnHand"]      = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
+
+    mv_positive     = to_move["WeightToMove"] > 0
+    total_wt_move   = to_move.loc[mv_positive, "WeightToMove"].sum()
     total_cost_move = to_move.loc[mv_positive, "CostToMove"].sum()
-    
+
     c1, c2, c3 = st.columns(3)
     c1.metric("SKUs to Move",         to_move["SKU"].nunique())
     c2.metric("Total Weight to Move", f"{total_wt_move:,.0f} lb")
     c3.metric("Total Cost to Move",   f"${total_cost_move:,.0f}")
-    
-    # filter & chart
+
     suppliers = sorted(to_move["Supplier"].dropna().unique())
     sel_sup   = st.multiselect("Filter Suppliers", suppliers, default=suppliers, key="mv1_sups")
-    mv1 = to_move[ mv_positive & to_move["Supplier"].isin(sel_sup) ]
-    
+    mv1       = to_move[mv_positive & to_move["Supplier"].isin(sel_sup)]
+
     if mv1.empty:
         st.info("No items match the current filters.")
     else:
@@ -93,15 +85,15 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
                 color="Supplier:N",
                 opacity=alt.condition(sel2, alt.value(1), alt.value(0.2)),
                 tooltip=[
-                    alt.Tooltip("SKU_Desc:N",            title="SKU"),
-                    alt.Tooltip("Supplier:N",            title="Supplier"),
-                    alt.Tooltip("WeeksOnHand:Q",         title="Current FZ WOH"),
-                    alt.Tooltip("OnHandWeightTotal:Q",   format=",.0f", title="FZ On-Hand Wt"),
-                    alt.Tooltip("EXT_Weight:Q",          format=",.0f", title="EXT On-Hand Wt"),
-                    alt.Tooltip("TotalOnHand:Q",         format=",.0f", title="Total On-Hand Wt"),
-                    alt.Tooltip("DesiredFZ_Weight:Q",    format=",.0f", title="Desired FZ Wt"),
-                    alt.Tooltip("WeightToMove:Q",        format=",.0f", title="Weight to Move"),
-                    alt.Tooltip("CostToMove:Q",          format=",.0f", title="Cost to Move"),
+                    alt.Tooltip("SKU_Desc:N",          title="SKU"),
+                    alt.Tooltip("Supplier:N",          title="Supplier"),
+                    alt.Tooltip("WeeksOnHand:Q",       title="Current FZ WOH"),
+                    alt.Tooltip("OnHandWeightTotal:Q", format=",.0f", title="FZ On-Hand Wt"),
+                    alt.Tooltip("EXT_Weight:Q",        format=",.0f", title="EXT On-Hand Wt"),
+                    alt.Tooltip("TotalOnHand:Q",       format=",.0f", title="Total On-Hand Wt"),
+                    alt.Tooltip("DesiredFZ_Weight:Q",  format=",.0f", title="Desired FZ Wt"),
+                    alt.Tooltip("WeightToMove:Q",      format=",.0f", title="Weight to Move"),
+                    alt.Tooltip("CostToMove:Q",        format=",.0f", title="Cost to Move"),
                 ]
             )
             .add_selection(sel2)
@@ -110,7 +102,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             .interactive()
         )
         st.altair_chart(theme(chart1), use_container_width=True)
-    
+
         buf1 = io.BytesIO()
         mv1.to_excel(buf1, index=False, sheet_name="FZ2EXT")
         buf1.seek(0)
@@ -120,45 +112,50 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             file_name="FZ2EXT.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    
-    
+
     # ── Move EXT → FZ ────────────────────────────────────────────
     st.subheader("🔄 Move EXT → FZ")
-    
+    # dynamic default threshold
+    thr2_default = 1.0
+    try:
+        if not df_hc.empty:
+            thr2_default = float(compute_threshold_move(ext_full, df_hc))
+    except:
+        pass
+
     thr2 = st.slider(
         "Desired FZ WOH to achieve",
         0.0,
-        float(ext_full["WeeksOnHand"].max()),
-        1.0,
+        float(fz_woh.max()),
+        thr2_default,
         step=0.25,
         key="e2f_thr"
     )
-    
-    back = ext_full[ ext_full["SKU"].map(fz_woh).fillna(0) < thr2 ].copy()
+
+    back = ext_full[ext_full["SKU"].map(fz_woh).fillna(0) < thr2].copy()
+    back["FZ_WOH"]           = back["SKU"].map(fz_woh).fillna(0)
     back["DesiredFZ_Weight"] = back["AvgWeeklyUsage"] * thr2
-    back["WeightToReturn"]   = (back["DesiredFZ_Weight"] - back["SKU"].map(fz_weight).fillna(0))\
-                                 .clip(lower=0, upper=back["OnHandWeightTotal"])
-    back["CostToReturn"]     = (back["WeightToReturn"] / back["OnHandWeightTotal"])\
-                                 * back["OnHandCostTotal"]
-    
-    # compute FZ & EXT on-hand & total
-    back["FZ_Weight"]   = back["SKU"].map(fz_weight).fillna(0)
-    back["TotalOnHand"] = back["OnHandWeightTotal"] + back["FZ_Weight"]
-    
-    # metrics
-    total_wt_return = back["WeightToReturn"].sum()
+    back["WeightToReturn"]   = (
+        back["DesiredFZ_Weight"] - back["FZ_Weight"].fillna(back["SKU"].map(fz_weight).fillna(0))
+    ).clip(lower=0, upper=back["OnHandWeightTotal"])
+    back["CostToReturn"]     = (
+        back["WeightToReturn"] / back["OnHandWeightTotal"]
+    ) * back["OnHandCostTotal"]
+    back["FZ_Weight"]        = back["SKU"].map(fz_weight).fillna(0)
+    back["TotalOnHand"]      = back["OnHandWeightTotal"] + back["FZ_Weight"]
+
+    total_wt_return  = back["WeightToReturn"].sum()
     total_cost_return = back["CostToReturn"].sum()
-    
+
     col1, col2, col3 = st.columns(3)
     col1.metric("SKUs to Return",         back["SKU"].nunique())
     col2.metric("Total Weight to Return", f"{total_wt_return:,.0f} lb")
     col3.metric("Total Cost to Return",   f"${total_cost_return:,.0f}")
-    
-    # filter & chart
+
     sup2    = sorted(back["Supplier"].dropna().unique())
     chosen2 = st.multiselect("Filter Suppliers", sup2, default=sup2, key="mv2_sups")
-    back    = back[ back["Supplier"].isin(chosen2) ]
-    
+    back    = back[back["Supplier"].isin(chosen2)]
+
     if back.empty:
         st.info("No items match the current filters.")
     else:
@@ -177,7 +174,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
                     alt.Tooltip("OnHandWeightTotal:Q",   format=",.0f", title="EXT On-Hand Wt"),
                     alt.Tooltip("FZ_Weight:Q",           format=",.0f", title="FZ On-Hand Wt"),
                     alt.Tooltip("TotalOnHand:Q",         format=",.0f", title="Total On-Hand Wt"),
-                    alt.Tooltip("WeeksOnHand:Q",         title="Current FZ WOH"),
+                    alt.Tooltip("FZ_WOH:Q",              title="Current FZ WOH"),
                     alt.Tooltip("DesiredFZ_Weight:Q",    format=",.0f", title="Desired FZ Wt"),
                     alt.Tooltip("WeightToReturn:Q",      format=",.0f", title="Weight to Return"),
                     alt.Tooltip("CostToReturn:Q",        format=",.0f", title="Cost to Return"),
@@ -189,7 +186,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             .interactive()
         )
         st.altair_chart(theme(chart2), use_container_width=True)
-    
+
         buf2 = io.BytesIO()
         back.to_excel(buf2, index=False, sheet_name="EXT2FZ")
         buf2.seek(0)
@@ -199,16 +196,11 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             file_name="EXT2FZ.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-  
+
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of WOH")
-
-    bin_count = st.slider(
-        "Number of bins (WOH dist)",
-        min_value=10, max_value=100, value=40, step=5,
-        key="woh_bins"
-    )
-    wo_max = st.slider(
+    bin_count = st.slider("Number of bins (WOH dist)", 10, 100, 40, step=5, key="woh_bins")
+    wo_max    = st.slider(
         "Max WOH (weeks) to display",
         float(df["WeeksOnHand"].min()),
         float(df["WeeksOnHand"].quantile(0.99)),
@@ -216,7 +208,6 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         step=1.0,
         key="woh_max"
     )
-
     filtered = df[df["WeeksOnHand"] <= wo_max]
 
     hist = (
@@ -235,7 +226,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         alt.Chart(filtered)
         .transform_density(
             "WeeksOnHand",
-            as_=["WeeksOnHand","density"],
+            as_=["WeeksOnHand", "density"],
             extent=[0, wo_max],
             counts=True,
             steps=bin_count
@@ -250,23 +241,18 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
 
     mean_val   = float(filtered["WeeksOnHand"].mean())
     median_val = float(filtered["WeeksOnHand"].median())
-
     mean_rule   = alt.Chart(pd.DataFrame({"value":[mean_val]})).mark_rule(color="red", size=2).encode(x="value:Q")
     median_rule = alt.Chart(pd.DataFrame({"value":[median_val]})).mark_rule(color="blue", strokeDash=[4,4], size=2).encode(x="value:Q")
 
-    st.altair_chart(theme((hist + dens + mean_rule + median_rule).properties(height=350).interactive()),
-                     use_container_width=True)
+    st.altair_chart(
+        theme((hist + dens + mean_rule + median_rule).properties(height=350).interactive()),
+        use_container_width=True
+    )
     st.markdown("**Red** = mean • **Blue (dashed)** = median • **Orange** = density")
 
     # ── Annual Turns Distribution ───────────────────────────────
     st.subheader("Annual Turns Distribution")
-
-    turn_bins = st.slider(
-        "Number of bins (Annual Turns)",
-        min_value=10, max_value=100, value=30, step=5,
-        key="turn_bins"
-    )
-
+    turn_bins = st.slider("Number of bins (Annual Turns)", 10, 100, 30, step=5, key="turn_bins")
     mean_at   = float(df["AnnualTurns"].mean())
     median_at = float(df["AnnualTurns"].median())
 
@@ -274,8 +260,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         alt.Chart(df)
         .mark_bar(opacity=0.6)
         .encode(
-            x=alt.X("AnnualTurns:Q", bin=alt.Bin(maxbins=turn_bins),
-                    title="Annual Turns"),
+            x=alt.X("AnnualTurns:Q", bin=alt.Bin(maxbins=turn_bins), title="Annual Turns"),
             y=alt.Y("count():Q", title="Count of SKUs"),
             tooltip=[alt.Tooltip("count():Q", title="Count")]
         )
@@ -291,9 +276,8 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     avg_state = (
         df.groupby("ProductState", as_index=False)["WeeksOnHand"]
           .mean().rename(columns={"ProductState":"State","WeeksOnHand":"AvgWOH"})
+          .fillna({"State":"Unknown"})
     )
-    avg_state["State"] = avg_state["State"].fillna("Unknown")
-
     order = avg_state.sort_values("AvgWOH")["State"].tolist()
     min_wo = st.slider(
         "Hide states with Avg WOH below",
@@ -324,23 +308,23 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     # ── WOH Distribution by Protein ───────────────────────────
     st.subheader("WOH Distribution by Protein")
     order_p = (
-        df.groupby("Protein")["WeeksOnHand"].median()
+        df.groupby("Protein")["WeeksOnHand"]
+          .median()
           .sort_values(ascending=False)
           .index.tolist()
     )
     sel = alt.selection_point(fields=["Protein"], bind="legend")
-
     box = (
         alt.Chart(df)
         .mark_boxplot(extent="min-max")
         .encode(
-            x="WeeksOnHand:Q", y=alt.Y("Protein:N", sort=order_p),                                
+            x="WeeksOnHand:Q",
+            y=alt.Y("Protein:N", sort=order_p),
             color="Protein:N",
             opacity=alt.condition(sel, alt.value(1), alt.value(0.2))
         )
         .add_selection(sel)
     )
-
     jitter = (
         alt.Chart(df)
         .transform_calculate(y_jitter="(random() - 0.5) * 0.6")
@@ -354,5 +338,4 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             tooltip=["SKU_Desc","WeeksOnHand"]
         )
     )
-
     st.altair_chart(theme((box + jitter).properties(width=800, height=400).interactive()), use_container_width=True)
