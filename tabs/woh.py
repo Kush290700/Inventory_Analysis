@@ -199,45 +199,53 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     
-    
     # ── Forecast: Weight On-Hand Needed ────────────────────────────────────────
     st.subheader("🔮 Forecasted On-Hand Weight Needed")
     
-    # choose SKU & horizon
-    skus = sorted(df["SKU"].unique())
+    # SKU & horizon selectors
+    skus    = sorted(df["SKU"].unique())
     sku_sel = st.selectbox("SKU to forecast", skus, key="fc_sku")
     horizon = st.slider("Forecast horizon (weeks)", 1, 12, 4, key="fc_horizon")
     
-    # build time series of weekly usage
+    # build weekly usage series from cleaned df
     ts = (
         df[df["SKU"] == sku_sel]
-        .groupby("Date")[["TotalUsage"]]
-        .sum()
+        .dropna(subset=["Date"])               # drop any rows where date parse failed
+        .set_index("Date")                     # use Date as index
+        .resample("W")                         # weekly frequency
+        [["TotalUsage"]]                       # keep only TotalUsage
+        .sum()                                 # sum usage per week
         .reset_index()
-        .rename(columns={"Date":"ds", "TotalUsage":"y"})
+        .rename(columns={"Date": "ds", "TotalUsage": "y"})
     )
     
-    # fit Prophet
-    m = Prophet(weekly_seasonality=True, daily_seasonality=False, yearly_seasonality=True)
-    m.fit(ts)
+    # check we have at least a few points
+    if len(ts) < 2:
+        st.warning(f"Not enough historical data for SKU {sku_sel} to forecast.")
+    else:
+        m = Prophet(weekly_seasonality=True, yearly_seasonality=True, daily_seasonality=False)
+        m.fit(ts)
     
-    future = m.make_future_dataframe(periods=horizon, freq="W")
-    fcast  = m.predict(future)
-    # compute “needed on-hand” = forecast × desired WOH
-    fcast["OnHandNeeded"] = fcast["yhat"] * st.session_state.w2e_thr
+        future = m.make_future_dataframe(periods=horizon, freq="W")
+        fcast  = m.predict(future)
+        # calculate weight needed = forecast × desired WOH
+        desired_woh = st.session_state.w2e_thr
+        fcast["OnHandNeeded"] = fcast["yhat"] * desired_woh
     
-    # plot
-    chart_fc = (
-        alt.Chart(fcast)
-        .mark_line()
-        .encode(
-            x="ds:T",
-            y=alt.Y("OnHandNeeded:Q", title="Weight Needed (lb)")
+        chart_fc = (
+            alt.Chart(fcast)
+            .mark_line()
+            .encode(
+                x=alt.X("ds:T", title="Week"),
+                y=alt.Y("OnHandNeeded:Q", title="Forecasted Weight Needed (lb)")
+            )
+            .properties(
+                title=f"SKU {sku_sel}: Forecasted On-Hand Weight for {desired_woh} WOH",
+                width=800, height=400
+            )
         )
-        .properties(title=f"Forecasted On-Hand for {sku_sel} (WOH={st.session_state.w2e_thr}wk)")
-    )
-    st.altair_chart(chart_fc, use_container_width=True)
-
+        st.altair_chart(chart_fc, use_container_width=True)
+    
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of WOH")
 
