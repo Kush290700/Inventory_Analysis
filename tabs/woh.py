@@ -11,57 +11,38 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.classification import compute_threshold_move
 
 def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
-    """
-    📊 Weeks-On-Hand Analysis
-    df: aggregated SKU-level DataFrame with columns:
-        SKU, SKU_Desc, ProductState, Supplier,
-        WeeksOnHand, AvgWeeklyUsage,
-        OnHandWeightTotal, OnHandCostTotal
-    df_hc: holding-cost DataFrame (for threshold logic)
-    theme: Altair theme function
-    """
     st.header("📊 Weeks-On-Hand Analysis")
 
-    # ── Precompute FZ & EXT lookups & exclude zero-usage ───────────────────────
+    # ── Precompute FZ & EXT, exclude zero-usage ───────────────────────────
     fz = df[
         (df["ProductState"].str.upper().str.startswith("FZ")) &
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
-    fz["Status"] = np.where(fz["AvgWeeklyUsage"] == 0, "Frozen", "Active")
-
-    ext_full = df[
+    ext = df[
         (df["ProductState"].str.upper().str.startswith("EXT")) &
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
-    ext_full["Status"] = np.where(ext_full["AvgWeeklyUsage"] == 0, "Frozen", "Active")
 
     # lookups
-    fz_woh            = fz.set_index("SKU")["WeeksOnHand"]
-    fz_weight         = fz.set_index("SKU")["OnHandWeightTotal"]
-    fz_cost           = fz.set_index("SKU")["OnHandCostTotal"]
-    ext_weight_lookup = ext_full.set_index("SKU")["OnHandWeightTotal"]
-    ext_cost_lookup   = ext_full.set_index("SKU")["OnHandCostTotal"]
+    fz_woh    = fz.set_index("SKU")["WeeksOnHand"]
+    fz_weight = fz.set_index("SKU")["OnHandWeightTotal"]
+    fz_cost   = fz.set_index("SKU")["OnHandCostTotal"]
+    ext_weight_lookup = ext.set_index("SKU")["OnHandWeightTotal"]
 
     # ── Move FZ → EXT ────────────────────────────────────────────
     st.subheader("🔄 Move FZ → EXT")
-    thr1 = st.slider(
-        "Desired FZ WOH (weeks)",
-        0.0, 52.0, 4.0, 0.5,
-        key="w2e_thr"
-    )
+    thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 52.0, 4.0, 0.5, key="w2e_thr")
 
     to_move = fz[fz["WeeksOnHand"] > thr1].copy()
     to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
     to_move["WeightToMove"]     = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
-    to_move["CostToMove"]       = (
-        to_move["WeightToMove"] / to_move["OnHandWeightTotal"]
-    ) * to_move["OnHandCostTotal"]
+    to_move["CostToMove"]       = (to_move["WeightToMove"] / to_move["OnHandWeightTotal"]) * to_move["OnHandCostTotal"]
     to_move["EXT_Weight"]       = to_move["SKU"].map(ext_weight_lookup).fillna(0)
     to_move["TotalOnHand"]      = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
 
-    mv_positive     = to_move["WeightToMove"] > 0
-    total_wt_move   = to_move.loc[mv_positive, "WeightToMove"].sum()
-    total_cost_move = to_move.loc[mv_positive, "CostToMove"].sum()
+    mv_pos = to_move["WeightToMove"] > 0
+    total_wt_move  = to_move.loc[mv_pos, "WeightToMove"].sum()
+    total_cost_move = to_move.loc[mv_pos, "CostToMove"].sum()
 
     c1, c2, c3 = st.columns(3)
     c1.metric("SKUs to Move",         to_move["SKU"].nunique())
@@ -70,7 +51,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
 
     suppliers = sorted(to_move["Supplier"].dropna().unique())
     sel_sup   = st.multiselect("Filter Suppliers", suppliers, default=suppliers, key="mv1_sups")
-    mv1       = to_move[mv_positive & to_move["Supplier"].isin(sel_sup)]
+    mv1       = to_move[mv_pos & to_move["Supplier"].isin(sel_sup)]
 
     if mv1.empty:
         st.info("No items match the current filters.")
@@ -106,12 +87,9 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         buf1 = io.BytesIO()
         mv1.to_excel(buf1, index=False, sheet_name="FZ2EXT")
         buf1.seek(0)
-        st.download_button(
-            "Download FZ→EXT List",
-            buf1.getvalue(),
-            file_name="FZ2EXT.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("Download FZ→EXT List", buf1.getvalue(),
+                           file_name="FZ2EXT.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     # ── Move EXT → FZ ────────────────────────────────────────────
     st.subheader("🔄 Move EXT → FZ")
@@ -119,29 +97,22 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     thr2_default = 1.0
     try:
         if not df_hc.empty:
-            thr2_default = float(compute_threshold_move(ext_full, df_hc))
+            thr2_default = float(compute_threshold_move(ext, df_hc))
     except:
         pass
 
-    thr2 = st.slider(
-        "Desired FZ WOH to achieve",
-        0.0,
-        float(fz_woh.max()),
-        thr2_default,
-        step=0.25,
-        key="e2f_thr"
-    )
+    thr2 = st.slider("Desired FZ WOH to achieve",
+                     0.0, float(fz_woh.max()), thr2_default, step=0.25, key="e2f_thr")
 
-    back = ext_full[ext_full["SKU"].map(fz_woh).fillna(0) < thr2].copy()
+    back = ext[ext["SKU"].map(fz_woh).fillna(0) < thr2].copy()
+    # **first** map FZ_Weight so column exists
+    back["FZ_Weight"]        = back["SKU"].map(fz_weight).fillna(0)
     back["FZ_WOH"]           = back["SKU"].map(fz_woh).fillna(0)
     back["DesiredFZ_Weight"] = back["AvgWeeklyUsage"] * thr2
     back["WeightToReturn"]   = (
-        back["DesiredFZ_Weight"] - back["FZ_Weight"].fillna(back["SKU"].map(fz_weight).fillna(0))
+        back["DesiredFZ_Weight"] - back["FZ_Weight"]
     ).clip(lower=0, upper=back["OnHandWeightTotal"])
-    back["CostToReturn"]     = (
-        back["WeightToReturn"] / back["OnHandWeightTotal"]
-    ) * back["OnHandCostTotal"]
-    back["FZ_Weight"]        = back["SKU"].map(fz_weight).fillna(0)
+    back["CostToReturn"]     = (back["WeightToReturn"] / back["OnHandWeightTotal"]) * back["OnHandCostTotal"]
     back["TotalOnHand"]      = back["OnHandWeightTotal"] + back["FZ_Weight"]
 
     total_wt_return  = back["WeightToReturn"].sum()
@@ -190,12 +161,10 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         buf2 = io.BytesIO()
         back.to_excel(buf2, index=False, sheet_name="EXT2FZ")
         buf2.seek(0)
-        st.download_button(
-            "Download EXT→FZ List",
-            buf2.getvalue(),
-            file_name="EXT2FZ.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("Download EXT→FZ List", buf2.getvalue(),
+                           file_name="EXT2FZ.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of WOH")
