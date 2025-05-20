@@ -201,53 +201,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     
-    # ── Forecast: Weight On-Hand Needed ────────────────────────────────────────
-    st.subheader("🔮 Forecasted On-Hand Weight Needed")
-    
-    # SKU & horizon selectors
-    skus    = sorted(df["SKU"].unique())
-    sku_sel = st.selectbox("SKU to forecast", skus, key="fc_sku")
-    horizon = st.slider("Forecast horizon (weeks)", 1, 12, 4, key="fc_horizon")
-    
-    # build weekly usage series from cleaned df
-    ts = (
-        df[df["SKU"] == sku_sel]
-        .dropna(subset=["Date"])               # drop any rows where date parse failed
-        .set_index("Date")                     # use Date as index
-        .resample("W")                         # weekly frequency
-        [["TotalUsage"]]                       # keep only TotalUsage
-        .sum()                                 # sum usage per week
-        .reset_index()
-        .rename(columns={"Date": "ds", "TotalUsage": "y"})
-    )
-    
-    # check we have at least a few points
-    if len(ts) < 2:
-        st.warning(f"Not enough historical data for SKU {sku_sel} to forecast.")
-    else:
-        m = Prophet(weekly_seasonality=True, yearly_seasonality=True, daily_seasonality=False)
-        m.fit(ts)
-    
-        future = m.make_future_dataframe(periods=horizon, freq="W")
-        fcast  = m.predict(future)
-        # calculate weight needed = forecast × desired WOH
-        desired_woh = st.session_state.w2e_thr
-        fcast["OnHandNeeded"] = fcast["yhat"] * desired_woh
-    
-        chart_fc = (
-            alt.Chart(fcast)
-            .mark_line()
-            .encode(
-                x=alt.X("ds:T", title="Week"),
-                y=alt.Y("OnHandNeeded:Q", title="Forecasted Weight Needed (lb)")
-            )
-            .properties(
-                title=f"SKU {sku_sel}: Forecasted On-Hand Weight for {desired_woh} WOH",
-                width=800, height=400
-            )
-        )
-        st.altair_chart(chart_fc, use_container_width=True)
-    
+  
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of WOH")
 
