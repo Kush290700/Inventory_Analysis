@@ -22,17 +22,27 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     """
     st.header("📊 Weeks-On-Hand Analysis")
 
-    # ── Precompute FZ WeeksOnHand lookup & exclude zero-usage ────────────────
+    # ── Precompute FZ & EXT lookups & exclude zero-usage ───────────────────────
     fz = df[
         (df["ProductState"].str.upper().str.startswith("FZ")) &
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
     fz["Status"] = np.where(fz["AvgWeeklyUsage"] == 0, "Frozen", "Active")
     
-    # lookup: SKU → FZ WeeksOnHand & FZ OnHandWeight
-    fz_woh = fz.set_index("SKU")["WeeksOnHand"]
+    ext_full = df[
+        (df["ProductState"].str.upper().str.startswith("EXT")) &
+        (df["AvgWeeklyUsage"] > 0)
+    ].copy()
+    ext_full["Status"] = np.where(ext_full["AvgWeeklyUsage"] == 0, "Frozen", "Active")
+    
+    # lookup: SKU → FZ metrics
+    fz_woh    = fz.set_index("SKU")["WeeksOnHand"]
     fz_weight = fz.set_index("SKU")["OnHandWeightTotal"]
     fz_cost   = fz.set_index("SKU")["OnHandCostTotal"]
+    
+    # lookup: SKU → EXT on-hand
+    ext_weight_lookup = ext_full.set_index("SKU")["OnHandWeightTotal"]
+    ext_cost_lookup   = ext_full.set_index("SKU")["OnHandCostTotal"]
     
     
     # ── Move FZ → EXT ────────────────────────────────────────────
@@ -44,32 +54,31 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         key="w2e_thr"
     )
     
-    # only those above threshold
-    sel = fz["WeeksOnHand"] > thr1
-    to_move = fz[sel].copy()
-    
-    # compute how much weight to send: current_weight - desired_weight
+    to_move = fz[fz["WeeksOnHand"] > thr1].copy()
     to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
-    to_move["WeightToMove"]    = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
-    # prorate cost
-    to_move["CostToMove"]      = (
-        to_move["WeightToMove"] /
-        to_move["OnHandWeightTotal"]
+    to_move["WeightToMove"]     = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
+    to_move["CostToMove"]       = (
+        to_move["WeightToMove"] / to_move["OnHandWeightTotal"]
     ) * to_move["OnHandCostTotal"]
     
-    # metrics (exclude any tiny negatives)
-    total_wt_move = to_move.loc[to_move["WeightToMove"]>0, "WeightToMove"].sum()
-    total_cost_move = to_move.loc[to_move["WeightToMove"]>0, "CostToMove"].sum()
+    # map EXT on-hand & compute total
+    to_move["EXT_Weight"]   = to_move["SKU"].map(ext_weight_lookup).fillna(0)
+    to_move["TotalOnHand"]  = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
+    
+    # metrics
+    mv_positive = to_move["WeightToMove"] > 0
+    total_wt_move  = to_move.loc[mv_positive, "WeightToMove"].sum()
+    total_cost_move = to_move.loc[mv_positive, "CostToMove"].sum()
     
     c1, c2, c3 = st.columns(3)
     c1.metric("SKUs to Move",         to_move["SKU"].nunique())
     c2.metric("Total Weight to Move", f"{total_wt_move:,.0f} lb")
     c3.metric("Total Cost to Move",   f"${total_cost_move:,.0f}")
     
-    # supplier filter
+    # filter & chart
     suppliers = sorted(to_move["Supplier"].dropna().unique())
     sel_sup   = st.multiselect("Filter Suppliers", suppliers, default=suppliers, key="mv1_sups")
-    mv1 = to_move[to_move["Supplier"].isin(sel_sup) & (to_move["WeightToMove"]>0)]
+    mv1 = to_move[ mv_positive & to_move["Supplier"].isin(sel_sup) ]
     
     if mv1.empty:
         st.info("No items match the current filters.")
@@ -84,13 +93,15 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
                 color="Supplier:N",
                 opacity=alt.condition(sel2, alt.value(1), alt.value(0.2)),
                 tooltip=[
-                    alt.Tooltip("SKU_Desc:N", title="SKU"),
-                    alt.Tooltip("Supplier:N", title="Supplier"),
-                    alt.Tooltip("WeeksOnHand:Q", title="Current FZ WOH"),
-                    alt.Tooltip("OnHandWeightTotal:Q",   format=",.0f", title="On-Hand Wt"),
-                    alt.Tooltip("DesiredFZ_Weight:Q", format=",.0f", title="Desired FZ Wt"),
-                    alt.Tooltip("WeightToMove:Q", format=",.0f", title="Weight to Move"),
-                    alt.Tooltip("CostToMove:Q",   format=",.0f", title="Cost to Move"),
+                    alt.Tooltip("SKU_Desc:N",            title="SKU"),
+                    alt.Tooltip("Supplier:N",            title="Supplier"),
+                    alt.Tooltip("WeeksOnHand:Q",         title="Current FZ WOH"),
+                    alt.Tooltip("OnHandWeightTotal:Q",   format=",.0f", title="FZ On-Hand Wt"),
+                    alt.Tooltip("EXT_Weight:Q",          format=",.0f", title="EXT On-Hand Wt"),
+                    alt.Tooltip("TotalOnHand:Q",         format=",.0f", title="Total On-Hand Wt"),
+                    alt.Tooltip("DesiredFZ_Weight:Q",    format=",.0f", title="Desired FZ Wt"),
+                    alt.Tooltip("WeightToMove:Q",        format=",.0f", title="Weight to Move"),
+                    alt.Tooltip("CostToMove:Q",          format=",.0f", title="Cost to Move"),
                 ]
             )
             .add_selection(sel2)
@@ -114,39 +125,25 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     # ── Move EXT → FZ ────────────────────────────────────────────
     st.subheader("🔄 Move EXT → FZ")
     
-    ext = df[
-        (df["ProductState"].str.upper().str.startswith("EXT")) &
-        (df["AvgWeeklyUsage"] > 0)
-    ].copy()
-    ext["Status"] = np.where(ext["AvgWeeklyUsage"] == 0, "Frozen", "Active")
-    
-    # map in the existing FZ weight and WOH
-    ext["FZ_WOH"]    = ext["SKU"].map(fz_woh).fillna(0)
-    ext["FZ_Weight"] = ext["SKU"].map(fz_weight).fillna(0)
-    ext["FZ_Cost"]   = ext["SKU"].map(fz_cost).fillna(0)
-    
-    # threshold slider
     thr2 = st.slider(
         "Desired FZ WOH to achieve",
         0.0,
-        float(ext["FZ_WOH"].max()),
+        float(ext_full["WeeksOnHand"].max()),
         1.0,
         step=0.25,
         key="e2f_thr"
     )
     
-    # only those below threshold
-    back = ext[ext["FZ_WOH"] < thr2].copy()
-    
-    # compute how much to bring back to FZ
+    back = ext_full[ ext_full["SKU"].map(fz_woh).fillna(0) < thr2 ].copy()
     back["DesiredFZ_Weight"] = back["AvgWeeklyUsage"] * thr2
-    back["WeightToReturn"]   = back["DesiredFZ_Weight"] - back["FZ_Weight"]
-    # cap at what's actually at EXT
-    back["WeightToReturn"]   = back[ "WeightToReturn"].clip(lower=0, upper=back["OnHandWeightTotal"])
-    back["CostToReturn"]     = (
-        back["WeightToReturn"] /
-        back["OnHandWeightTotal"]
-    ) * back["OnHandCostTotal"]
+    back["WeightToReturn"]   = (back["DesiredFZ_Weight"] - back["SKU"].map(fz_weight).fillna(0))\
+                                 .clip(lower=0, upper=back["OnHandWeightTotal"])
+    back["CostToReturn"]     = (back["WeightToReturn"] / back["OnHandWeightTotal"])\
+                                 * back["OnHandCostTotal"]
+    
+    # compute FZ & EXT on-hand & total
+    back["FZ_Weight"]   = back["SKU"].map(fz_weight).fillna(0)
+    back["TotalOnHand"] = back["OnHandWeightTotal"] + back["FZ_Weight"]
     
     # metrics
     total_wt_return = back["WeightToReturn"].sum()
@@ -157,10 +154,10 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     col2.metric("Total Weight to Return", f"{total_wt_return:,.0f} lb")
     col3.metric("Total Cost to Return",   f"${total_cost_return:,.0f}")
     
-    # supplier filter
-    sup2 = sorted(back["Supplier"].dropna().unique())
+    # filter & chart
+    sup2    = sorted(back["Supplier"].dropna().unique())
     chosen2 = st.multiselect("Filter Suppliers", sup2, default=sup2, key="mv2_sups")
-    back = back[back["Supplier"].isin(chosen2)]
+    back    = back[ back["Supplier"].isin(chosen2) ]
     
     if back.empty:
         st.info("No items match the current filters.")
@@ -175,13 +172,15 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
                 color="Supplier:N",
                 opacity=alt.condition(sel3, alt.value(1), alt.value(0.2)),
                 tooltip=[
-                    alt.Tooltip("SKU_Desc:N",       title="SKU"),
-                    alt.Tooltip("Supplier:N",       title="Supplier"),
-                    alt.Tooltip("FZ_WOH:Q",         title="Current FZ WOH"),
-                    alt.Tooltip("OnHandWeightTotal:Q",   format=",.0f", title="On-Hand Wt"),
-                    alt.Tooltip("DesiredFZ_Weight:Q", format=",.0f", title="Desired FZ Wt"),
-                    alt.Tooltip("WeightToReturn:Q", format=",.0f", title="Weight to Return"),
-                    alt.Tooltip("CostToReturn:Q",   format=",.0f", title="Cost to Return"),
+                    alt.Tooltip("SKU_Desc:N",            title="SKU"),
+                    alt.Tooltip("Supplier:N",            title="Supplier"),
+                    alt.Tooltip("OnHandWeightTotal:Q",   format=",.0f", title="EXT On-Hand Wt"),
+                    alt.Tooltip("FZ_Weight:Q",           format=",.0f", title="FZ On-Hand Wt"),
+                    alt.Tooltip("TotalOnHand:Q",         format=",.0f", title="Total On-Hand Wt"),
+                    alt.Tooltip("WeeksOnHand:Q",         title="Current FZ WOH"),
+                    alt.Tooltip("DesiredFZ_Weight:Q",    format=",.0f", title="Desired FZ Wt"),
+                    alt.Tooltip("WeightToReturn:Q",      format=",.0f", title="Weight to Return"),
+                    alt.Tooltip("CostToReturn:Q",        format=",.0f", title="Cost to Return"),
                 ]
             )
             .add_selection(sel3)
@@ -200,7 +199,6 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             file_name="EXT2FZ.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    
   
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of WOH")
