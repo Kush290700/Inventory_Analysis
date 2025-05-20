@@ -4,6 +4,7 @@ import altair as alt
 import pandas as pd
 import sys, os
 import numpy as np
+from prophet import Prophet
 
 # ensure the project root is on the path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -21,61 +22,77 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     """
     st.header("📊 Weeks-On-Hand Analysis")
 
-    # ── Precompute FZ WeeksOnHand lookup ────────────────────────────────────────
-    # take only your “in-freeze” inventory
-    fz = df[df["ProductState"].str.upper().str.startswith("FZ")].copy()
+    # ── Precompute FZ WeeksOnHand lookup & exclude zero-usage ────────────────
+    fz = df[
+        (df["ProductState"].str.upper().str.startswith("FZ")) &
+        (df["AvgWeeklyUsage"] > 0)
+    ].copy()
     fz["Status"] = np.where(fz["AvgWeeklyUsage"] == 0, "Frozen", "Active")
     
-    # make a Series mapping SKU → FZ WeeksOnHand
+    # lookup: SKU → FZ WeeksOnHand & FZ OnHandWeight
     fz_woh = fz.set_index("SKU")["WeeksOnHand"]
+    fz_weight = fz.set_index("SKU")["OnHandWeightTotal"]
+    fz_cost   = fz.set_index("SKU")["OnHandCostTotal"]
+    
     
     # ── Move FZ → EXT ────────────────────────────────────────────
     st.subheader("🔄 Move FZ → EXT")
     
-    # threshold slider
     thr1 = st.slider(
-        "WOH threshold for FZ→EXT",
+        "Desired FZ WOH (weeks)",
         0.0, 52.0, 4.0, 0.5,
         key="w2e_thr"
     )
     
-    # select FZ rows whose own FZ WOH > threshold
-    to_move = fz[fz["WeeksOnHand"] > thr1]
+    # only those above threshold
+    sel = fz["WeeksOnHand"] > thr1
+    to_move = fz[sel].copy()
     
-    # summary metrics
+    # compute how much weight to send: current_weight - desired_weight
+    to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
+    to_move["WeightToMove"]    = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
+    # prorate cost
+    to_move["CostToMove"]      = (
+        to_move["WeightToMove"] /
+        to_move["OnHandWeightTotal"]
+    ) * to_move["OnHandCostTotal"]
+    
+    # metrics (exclude any tiny negatives)
+    total_wt_move = to_move.loc[to_move["WeightToMove"]>0, "WeightToMove"].sum()
+    total_cost_move = to_move.loc[to_move["WeightToMove"]>0, "CostToMove"].sum()
+    
     c1, c2, c3 = st.columns(3)
     c1.metric("SKUs to Move",         to_move["SKU"].nunique())
-    c2.metric("Total Weight to Move", f"{to_move['OnHandWeightTotal'].sum():,.0f} lb")
-    c3.metric("Total Cost to Move",   f"${to_move['OnHandCostTotal'].sum():,.0f}")
+    c2.metric("Total Weight to Move", f"{total_wt_move:,.0f} lb")
+    c3.metric("Total Cost to Move",   f"${total_cost_move:,.0f}")
     
     # supplier filter
     suppliers = sorted(to_move["Supplier"].dropna().unique())
     sel_sup   = st.multiselect("Filter Suppliers", suppliers, default=suppliers, key="mv1_sups")
-    mv1 = to_move[to_move["Supplier"].isin(sel_sup)]
+    mv1 = to_move[to_move["Supplier"].isin(sel_sup) & (to_move["WeightToMove"]>0)]
     
     if mv1.empty:
         st.info("No items match the current filters.")
     else:
-        sel = alt.selection_multi(fields=["Supplier"], bind="legend")
+        sel2 = alt.selection_multi(fields=["Supplier"], bind="legend")
         chart1 = (
             alt.Chart(mv1)
             .mark_bar()
             .encode(
                 y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
-                x=alt.X("OnHandWeightTotal:Q", title="Weight (lb)"),
+                x=alt.X("WeightToMove:Q", title="Weight to Move (lb)"),
                 color="Supplier:N",
-                opacity=alt.condition(sel, alt.value(1), alt.value(0.2)),
+                opacity=alt.condition(sel2, alt.value(1), alt.value(0.2)),
                 tooltip=[
                     alt.Tooltip("SKU_Desc:N", title="SKU"),
                     alt.Tooltip("Supplier:N", title="Supplier"),
-                    alt.Tooltip("WeeksOnHand:Q", title="FZ WOH (weeks)"),
-                    alt.Tooltip("OnHandWeightTotal:Q", title="Weight (lb)"),
-                    alt.Tooltip("OnHandCostTotal:Q", title="Cost ($)"),
-                    alt.Tooltip("Status:N", title="Status"),
-                ],
-                row=alt.Row("Status:N", title=None, header=alt.Header(labelFontSize=12))
+                    alt.Tooltip("WeeksOnHand:Q", title="Current FZ WOH"),
+                    alt.Tooltip("DesiredFZ_Weight:Q", format=",.0f", title="Desired FZ Wt"),
+                    alt.Tooltip("WeightToMove:Q", format=",.0f", title="Weight to Move"),
+                    alt.Tooltip("CostToMove:Q",   format=",.0f", title="Cost to Move"),
+                ]
             )
-            .add_selection(sel)
+            .add_selection(sel2)
             .properties(width=800, height=alt.Step(25))
             .resolve_scale(y="independent")
             .interactive()
@@ -92,41 +109,52 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     
+    
     # ── Move EXT → FZ ────────────────────────────────────────────
     st.subheader("🔄 Move EXT → FZ")
     
-    # grab only EXT-state rows
-    ext = df[df["ProductState"].str.upper().str.startswith("EXT")].copy()
+    ext = df[
+        (df["ProductState"].str.upper().str.startswith("EXT")) &
+        (df["AvgWeeklyUsage"] > 0)
+    ].copy()
     ext["Status"] = np.where(ext["AvgWeeklyUsage"] == 0, "Frozen", "Active")
     
-    # pull in the FZ WOH for each EXT SKU (default to 0 if missing)
-    ext["FZ_WOH"] = ext["SKU"].map(fz_woh).fillna(0)
+    # map in the existing FZ weight and WOH
+    ext["FZ_WOH"]    = ext["SKU"].map(fz_woh).fillna(0)
+    ext["FZ_Weight"] = ext["SKU"].map(fz_weight).fillna(0)
+    ext["FZ_Cost"]   = ext["SKU"].map(fz_cost).fillna(0)
     
-    # dynamic default threshold
-    thr2_default = 1.0
-    try:
-        if not df_hc.empty:
-            thr2_default = float(compute_threshold_move(ext, df_hc))
-    except:
-        pass
-    
+    # threshold slider
     thr2 = st.slider(
-        "Return EXT→FZ if **FZ** WOH <",
+        "Desired FZ WOH to achieve",
         0.0,
         float(ext["FZ_WOH"].max()),
-        thr2_default,
+        1.0,
         step=0.25,
         key="e2f_thr"
     )
     
-    # filter based on the FZ-state WOH, not the EXT WOH
-    back = ext[ext["FZ_WOH"] < thr2]
+    # only those below threshold
+    back = ext[ext["FZ_WOH"] < thr2].copy()
     
-    # summary metrics
+    # compute how much to bring back to FZ
+    back["DesiredFZ_Weight"] = back["AvgWeeklyUsage"] * thr2
+    back["WeightToReturn"]   = back["DesiredFZ_Weight"] - back["FZ_Weight"]
+    # cap at what's actually at EXT
+    back["WeightToReturn"]   = back[ "WeightToReturn"].clip(lower=0, upper=back["OnHandWeightTotal"])
+    back["CostToReturn"]     = (
+        back["WeightToReturn"] /
+        back["OnHandWeightTotal"]
+    ) * back["OnHandCostTotal"]
+    
+    # metrics
+    total_wt_return = back["WeightToReturn"].sum()
+    total_cost_return = back["CostToReturn"].sum()
+    
     col1, col2, col3 = st.columns(3)
     col1.metric("SKUs to Return",         back["SKU"].nunique())
-    col2.metric("Total Weight to Return", f"{back['OnHandWeightTotal'].sum():,.0f} lb")
-    col3.metric("Total Cost to Return",   f"${back['OnHandCostTotal'].sum():,.0f}")
+    col2.metric("Total Weight to Return", f"{total_wt_return:,.0f} lb")
+    col3.metric("Total Cost to Return",   f"${total_cost_return:,.0f}")
     
     # supplier filter
     sup2 = sorted(back["Supplier"].dropna().unique())
@@ -136,26 +164,25 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     if back.empty:
         st.info("No items match the current filters.")
     else:
-        sel2 = alt.selection_multi(fields=["Supplier"], bind="legend")
+        sel3 = alt.selection_multi(fields=["Supplier"], bind="legend")
         chart2 = (
             alt.Chart(back)
             .mark_bar()
             .encode(
                 y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
-                x=alt.X("OnHandWeightTotal:Q", title="Weight (lb)"),
+                x=alt.X("WeightToReturn:Q", title="Weight to Return (lb)"),
                 color="Supplier:N",
-                opacity=alt.condition(sel2, alt.value(1), alt.value(0.2)),
+                opacity=alt.condition(sel3, alt.value(1), alt.value(0.2)),
                 tooltip=[
-                    alt.Tooltip("SKU_Desc:N", title="SKU"),
-                    alt.Tooltip("Supplier:N", title="Supplier"),
-                    alt.Tooltip("FZ_WOH:Q", title="FZ WOH (weeks)"),
-                    alt.Tooltip("OnHandWeightTotal:Q", title="Weight (lb)"),
-                    alt.Tooltip("OnHandCostTotal:Q", title="Cost ($)"),
-                    alt.Tooltip("Status:N", title="Status"),
-                ],
-                row=alt.Row("Status:N", title=None, header=alt.Header(labelFontSize=12))
+                    alt.Tooltip("SKU_Desc:N",       title="SKU"),
+                    alt.Tooltip("Supplier:N",       title="Supplier"),
+                    alt.Tooltip("FZ_WOH:Q",         title="Current FZ WOH"),
+                    alt.Tooltip("DesiredFZ_Weight:Q", format=",.0f", title="Desired FZ Wt"),
+                    alt.Tooltip("WeightToReturn:Q", format=",.0f", title="Weight to Return"),
+                    alt.Tooltip("CostToReturn:Q",   format=",.0f", title="Cost to Return"),
+                ]
             )
-            .add_selection(sel2)
+            .add_selection(sel3)
             .properties(width=800, height=alt.Step(25))
             .resolve_scale(y="independent")
             .interactive()
@@ -171,6 +198,45 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             file_name="EXT2FZ.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+    
+    
+    # ── Forecast: Weight On-Hand Needed ────────────────────────────────────────
+    st.subheader("🔮 Forecasted On-Hand Weight Needed")
+    
+    # choose SKU & horizon
+    skus = sorted(df["SKU"].unique())
+    sku_sel = st.selectbox("SKU to forecast", skus, key="fc_sku")
+    horizon = st.slider("Forecast horizon (weeks)", 1, 12, 4, key="fc_horizon")
+    
+    # build time series of weekly usage
+    ts = (
+        df[df["SKU"] == sku_sel]
+        .groupby("Date")[["TotalUsage"]]
+        .sum()
+        .reset_index()
+        .rename(columns={"Date":"ds", "TotalUsage":"y"})
+    )
+    
+    # fit Prophet
+    m = Prophet(weekly_seasonality=True, daily_seasonality=False, yearly_seasonality=True)
+    m.fit(ts)
+    
+    future = m.make_future_dataframe(periods=horizon, freq="W")
+    fcast  = m.predict(future)
+    # compute “needed on-hand” = forecast × desired WOH
+    fcast["OnHandNeeded"] = fcast["yhat"] * st.session_state.w2e_thr
+    
+    # plot
+    chart_fc = (
+        alt.Chart(fcast)
+        .mark_line()
+        .encode(
+            x="ds:T",
+            y=alt.Y("OnHandNeeded:Q", title="Weight Needed (lb)")
+        )
+        .properties(title=f"Forecasted On-Hand for {sku_sel} (WOH={st.session_state.w2e_thr}wk)")
+    )
+    st.altair_chart(chart_fc, use_container_width=True)
 
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of WOH")
