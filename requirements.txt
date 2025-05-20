@@ -11,3 +11,7 @@ plotly>=5.15.0
 
 # Excel file support
 openpyxl>=3.0.0
+
+# Forecasting
+prophet>=1.1.1
+cmdstanpy>=1.0.0
