@@ -13,21 +13,58 @@ from utils.classification import compute_threshold_move
 def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     st.header("📊 Weeks-On-Hand Analysis")
 
-    # ── Ensure ItemCount is set ───────────────────────────────────────────
-    if "ItemCount" in df.columns:
-        item_counts = df["ItemCount"]
-    else:
-        # make a Series of 1s, same length as df
-        item_counts = pd.Series(1, index=df.index)
-
-    df["ItemCount"] = (
-        pd.to_numeric(item_counts, errors="coerce")
-          .fillna(1)       # now safe, because item_counts is a Series
-          .astype(int)
+    # ── Cost Sheet Upload & Merge ─────────────────────────────────────────
+    st.sidebar.subheader("Optional: SKU Cost Sheet")
+    cost_file = st.sidebar.file_uploader(
+        "Upload CSV or XLSX with columns [SKU, NumPacks, WeightLb, Cost]",
+        type=["csv","xlsx"], key="cost_sheet"
     )
+    if cost_file:
+        # read
+        if cost_file.name.lower().endswith("xlsx"):
+            cost_df = pd.read_excel(cost_file)
+        else:
+            cost_df = pd.read_csv(cost_file)
+        cost_df.columns = cost_df.columns.str.strip()
+        cost_df["SKU"]      = cost_df["SKU"].astype(str)
+        cost_df["NumPacks"] = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(0).astype(int)
+        cost_df["WeightLb"] = pd.to_numeric(cost_df["WeightLb"], errors="coerce").fillna(0)
+        # strip dollar sign, commas
+        cost_df["Cost"]     = (
+            cost_df["Cost"]
+                  .astype(str)
+                  .str.replace(r"[\$,]", "", regex=True)
+                  .astype(float)
+        )
+        # merge onto main df
+        df = df.merge(
+            cost_df[["SKU", "NumPacks", "WeightLb", "Cost"]],
+            on="SKU", how="left"
+        )
+        # override the on-hand totals from uploaded sheet
+        df["OnHandWeightTotal"] = df["WeightLb"]
+        df["OnHandCostTotal"]   = df["Cost"]
+        # derive pack counts & avg weight
+        df["PackCount"]         = df["NumPacks"]
+        df["AvgWeightPerPack"]  = (
+            df["OnHandWeightTotal"] /
+            df["PackCount"].replace(0, np.nan)
+        )
+    else:
+        # fallback to existing ItemCount logic
+        df["ItemCount"] = (
+            pd.to_numeric(df.get("ItemCount", 1), errors="coerce")
+              .fillna(1)
+              .astype(int)
+        )
+        df["PackCount"]        = df["ItemCount"]
+        df["AvgWeightPerPack"] = (
+            df["OnHandWeightTotal"] /
+            df["PackCount"].replace(0, np.nan)
+        )
 
     # ── Precompute FZ & EXT, exclude zero-usage ───────────────────────────
-    fz = df[
+    fz  = df[
         (df["ProductState"].str.upper().str.startswith("FZ")) &
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
@@ -46,28 +83,23 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 52.0, 4.0, 0.5, key="w2e_thr")
 
     to_move = fz[fz["WeeksOnHand"] > thr1].copy()
-    to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
-    to_move["WeightToMove"]     = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
-    to_move["CostToMove"]       = (
+    to_move["DesiredFZ_Weight"]   = to_move["AvgWeeklyUsage"] * thr1
+    to_move["WeightToMove"]       = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
+    to_move["CostToMove"]         = (
         to_move["WeightToMove"] / to_move["OnHandWeightTotal"]
     ) * to_move["OnHandCostTotal"]
-    to_move["EXT_Weight"]       = to_move["SKU"].map(ext_weight_lookup).fillna(0)
-    to_move["TotalOnHand"]      = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
+    to_move["EXT_Weight"]         = to_move["SKU"].map(ext_weight_lookup).fillna(0)
+    to_move["TotalOnHand"]        = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
 
-    # use your ItemCount as pack count
-    to_move["PackCount"]        = to_move["ItemCount"]
-    to_move["AvgWeightPerPack"] = (
-        to_move["OnHandWeightTotal"] / to_move["PackCount"].replace(0, np.nan)
-    )
-
-    mv_pos         = to_move["WeightToMove"] > 0
-    total_wt_move  = to_move.loc[mv_pos, "WeightToMove"].sum()
-    total_cost_move= to_move.loc[mv_pos, "CostToMove"].sum()
+    # keep pack data in tooltip
+    mv_pos        = to_move["WeightToMove"] > 0
+    total_wt_move = to_move.loc[mv_pos, "WeightToMove"].sum()
+    total_cost    = to_move.loc[mv_pos, "CostToMove"].sum()
 
     c1, c2, c3 = st.columns(3)
     c1.metric("SKUs to Move",         to_move["SKU"].nunique())
     c2.metric("Total Weight to Move", f"{total_wt_move:,.0f} lb")
-    c3.metric("Total Cost to Move",   f"${total_cost_move:,.0f}")
+    c3.metric("Total Cost to Move",   f"${total_cost:,.0f}")
 
     suppliers = sorted(to_move["Supplier"].dropna().unique())
     sel_sup   = st.multiselect("Filter Suppliers", suppliers, default=suppliers, key="mv1_sups")
@@ -86,17 +118,17 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
                 color="Supplier:N",
                 opacity=alt.condition(sel2, alt.value(1), alt.value(0.2)),
                 tooltip=[
-                    alt.Tooltip("SKU_Desc:N",          title="SKU"),
-                    alt.Tooltip("Supplier:N",          title="Supplier"),
-                    alt.Tooltip("WeeksOnHand:Q",       title="Current FZ WOH"),
-                    alt.Tooltip("OnHandWeightTotal:Q", format=",.0f", title="FZ On-Hand Wt"),
-                    alt.Tooltip("EXT_Weight:Q",        format=",.0f", title="EXT On-Hand Wt"),
-                    alt.Tooltip("TotalOnHand:Q",       format=",.0f", title="Total On-Hand Wt"),
-                    alt.Tooltip("PackCount:Q",         title="Packs Available"),
-                    alt.Tooltip("AvgWeightPerPack:Q",  format=",.1f", title="Avg Wt/Pack"),
-                    alt.Tooltip("DesiredFZ_Weight:Q",  format=",.0f", title="Desired FZ Wt"),
-                    alt.Tooltip("WeightToMove:Q",      format=",.0f", title="Weight to Move"),
-                    alt.Tooltip("CostToMove:Q",        format=",.0f", title="Cost to Move"),
+                    alt.Tooltip("SKU_Desc:N",            title="SKU"),
+                    alt.Tooltip("Supplier:N",            title="Supplier"),
+                    alt.Tooltip("WeeksOnHand:Q",         title="Current FZ WOH"),
+                    alt.Tooltip("OnHandWeightTotal:Q",   format=",.0f", title="FZ On-Hand Wt"),
+                    alt.Tooltip("EXT_Weight:Q",          format=",.0f", title="EXT On-Hand Wt"),
+                    alt.Tooltip("TotalOnHand:Q",         format=",.0f", title="Total On-Hand Wt"),
+                    alt.Tooltip("PackCount:Q",           title="Packs Available"),
+                    alt.Tooltip("AvgWeightPerPack:Q",    format=",.1f", title="Avg Wt/Pack"),
+                    alt.Tooltip("DesiredFZ_Weight:Q",    format=",.0f", title="Desired FZ Wt"),
+                    alt.Tooltip("WeightToMove:Q",        format=",.0f", title="Weight to Move"),
+                    alt.Tooltip("CostToMove:Q",          format=",.0f", title="Cost to Move"),
                 ]
             )
             .add_selection(sel2)
@@ -125,7 +157,8 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     except:
         pass
 
-    thr2 = st.slider("Desired FZ WOH to achieve", 0.0, float(fz_woh.max()), thr2_default, step=0.25, key="e2f_thr")
+    thr2 = st.slider("Desired FZ WOH to achieve",
+                     0.0, float(fz_woh.max()), thr2_default, step=0.25, key="e2f_thr")
 
     back = ext[ext["SKU"].map(fz_woh).fillna(0) < thr2].copy()
     back["FZ_Weight"]        = back["SKU"].map(fz_weight).fillna(0)
@@ -134,12 +167,15 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     back["WeightToReturn"]   = (
         back["DesiredFZ_Weight"] - back["FZ_Weight"]
     ).clip(lower=0, upper=back["OnHandWeightTotal"])
-    back["CostToReturn"]     = (back["WeightToReturn"] / back["OnHandWeightTotal"]) * back["OnHandCostTotal"]
+    back["CostToReturn"]     = (
+        back["WeightToReturn"] / back["OnHandWeightTotal"]
+    ) * back["OnHandCostTotal"]
     back["TotalOnHand"]      = back["OnHandWeightTotal"] + back["FZ_Weight"]
-
-    # use your ItemCount here too
-    back["PackCount"]        = back["ItemCount"]
-    back["AvgWeightPerPack"] = back["OnHandWeightTotal"] / back["PackCount"].replace(0, np.nan)
+    # packs & avg weight
+    back["PackCount"]        = back["PackCount"] if "PackCount" in back else back["ItemCount"]
+    back["AvgWeightPerPack"] = (
+        back["OnHandWeightTotal"] / back["PackCount"].replace(0, np.nan)
+    )
 
     total_wt_return   = back["WeightToReturn"].sum()
     total_cost_return = back["CostToReturn"].sum()
@@ -195,7 +231,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             file_name="EXT2FZ.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
+        
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of WOH")
     bin_count = st.slider("Number of bins (WOH dist)", 10, 100, 40, step=5, key="woh_bins")
