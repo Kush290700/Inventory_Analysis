@@ -10,7 +10,7 @@ from prophet import Prophet
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.classification import compute_threshold_move
 
-def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
+def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
     st.header("📊 Weeks-On-Hand Analysis")
 
     # ── Compute PackCount & AvgWeightPerPack ───────────────────────────────
@@ -18,15 +18,15 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     if "NumPacks" in cost_df.columns:
         packs_series = (
             pd.to_numeric(cost_df["NumPacks"], errors="coerce")
-              .fillna(0).astype(int)
+              .fillna(0)
+              .astype(int)
         )
-        # create mapping series: index=SKU, values=NumPacks
         pack_map = pd.Series(packs_series.values, index=cost_df["SKU"].astype(str))
         packs = df["SKU"].astype(str).map(pack_map)
     else:
         packs = pd.Series(np.nan, index=df.index)
 
-    # fallback to ItemCount or 1
+    # fallback to ItemCount if available, else to 1
     if "ItemCount" in df.columns:
         item_counts = pd.to_numeric(df["ItemCount"], errors="coerce").fillna(1).astype(int)
     else:
