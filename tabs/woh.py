@@ -447,7 +447,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
     labels = bars.mark_text(align="left", baseline="middle", dx=3).encode(text=alt.Text("AvgWOH:Q", format=".1f"))
     st.altair_chart(theme((bars + labels).properties(width=700, height=alt.Step(25))), use_container_width=True)
 
-    # ── WOH Distribution by Protein ───────────────────────────
+   # ── WOH Distribution by Protein ───────────────────────────
     st.subheader("WOH Distribution by Protein")
     order_p = (
         df.groupby("Protein")["WeeksOnHand"]
@@ -456,6 +456,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
           .index.tolist()
     )
     sel = alt.selection_point(fields=["Protein"], bind="legend")
+
     box = (
         alt.Chart(df)
         .mark_boxplot(extent="min-max")
@@ -467,6 +468,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         )
         .add_selection(sel)
     )
+
     jitter = (
         alt.Chart(df)
         .transform_calculate(y_jitter="(random() - 0.5) * 0.6")
@@ -480,4 +482,8 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
             tooltip=["SKU_Desc","WeeksOnHand"]
         )
     )
-    st.altair_chart(theme((box + jitter).properties(width=800, height=400).interactive()), use_container_width=True)
+
+    st.altair_chart(
+        theme((box + jitter).properties(width=800, height=400).interactive()),
+        use_container_width=True
+    )
