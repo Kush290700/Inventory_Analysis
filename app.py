@@ -67,7 +67,8 @@ def load_everything(uploaded_xlsx):
     # 5) raw “Mikuni” sheet
     mikuni_df = sheets.get("Mikuni", pd.DataFrame())
 
-    return df_woh, df_hc, sales_df, inv1_df, mikuni_df
+    # return all, including cost_df for WOH tab
+    return df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df
 
 # ──────────────────────────────────────────────────────────────
 # 3) Sidebar — uploader + filters + nav
@@ -78,7 +79,7 @@ if not raw_file:
     st.sidebar.warning("Please upload your master .xlsx to begin.")
     st.stop()
 
-df_woh, df_hc, sales_df, inv1_df, mikuni_df = load_everything(raw_file)
+df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df = load_everything(raw_file)
 
 # unified filters for WOH‐based tabs
 prot_opts  = ["All"] + sorted(df_woh["Protein"].unique())
@@ -117,7 +118,8 @@ section = st.sidebar.radio(
 if section == "📈 KPIs":
     kpis.render(df, df_hc, apply_theme)
 elif section == "📊 WOH":
-    woh.render(df, df_hc, apply_theme)
+    # pass cost_df so the WOH tab can map NumPacks correctly
+    woh.render(df, df_hc, cost_df, apply_theme)
 elif section == "🚀 Movers":
     movers.render(df, apply_theme)
 elif section == "💰 Holding Cost":
