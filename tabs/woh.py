@@ -35,8 +35,8 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         cost_df["SKU"]       = cost_df["SKU"].astype(str)
         cost_df["NumPacks"]  = pd.to_numeric(cost_df.get("NumPacks", 0), errors="coerce").fillna(0).astype(int)
         cost_df["WeightLb"]  = pd.to_numeric(cost_df.get("WeightLb", 0), errors="coerce").fillna(0)
-        cost_df["CostValue"] = (
-            cost_df["Cost Value"]
+        cost_df["Cost"] = (
+            cost_df["Cost"]
               .astype(str)
               .str.replace(r"[\$,]", "", regex=True)
               .astype(float)
@@ -44,14 +44,14 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
 
         # merge on the numeric key
         df = df.merge(
-            cost_df.rename(columns={"SKU":"SKU_cost"})[["SKU_cost","NumPacks","WeightLb","CostValue"]],
+            cost_df.rename(columns={"SKU":"SKU_cost"})[["SKU_cost","NumPacks","WeightLb","Cost"]],
             left_on="SKU_key", right_on="SKU_cost",
             how="left"
         )
 
         # override on-hand from sheet
         df["OnHandWeightTotal"] = df["WeightLb"]
-        df["OnHandCostTotal"]   = df["CostValue"]
+        df["OnHandCostTotal"]   = df["Cost"]
         pack_counts = df["NumPacks"]
     else:
         # fallback to ItemCount or default 1
