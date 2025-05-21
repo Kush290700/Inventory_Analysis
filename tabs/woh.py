@@ -14,18 +14,21 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     st.header("📊 Weeks-On-Hand Analysis")
 
     # ── Compute PackCount & AvgWeightPerPack ───────────────────────────────
-    # Use NumPacks if present, else default to 1
+    # Use NumPacks from your Cost Value sheet if present, else fallback to ItemCount, else 1
     if "NumPacks" in df.columns:
         packs = pd.to_numeric(df["NumPacks"], errors="coerce")
+    elif "ItemCount" in df.columns:
+        packs = pd.to_numeric(df["ItemCount"], errors="coerce")
     else:
         packs = pd.Series(1, index=df.index)
+
     df["PackCount"] = packs.fillna(1).astype(int)
     df["AvgWeightPerPack"] = (
         df["OnHandWeightTotal"] /
         df["PackCount"].replace(0, np.nan)
     )
 
-    # ── Precompute FZ & EXT, exclude zero-usage ────────────────────────────
+    # ── Precompute FZ & EXT, exclude zero-usage ─────────────────────────────
     fz  = df[
         (df["ProductState"].str.upper().str.startswith("FZ")) &
         (df["AvgWeeklyUsage"] > 0)
@@ -36,18 +39,17 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     ].copy()
 
     fz_woh            = fz.set_index("SKU")["WeeksOnHand"]
+    fz_weight         = fz.set_index("SKU")["OnHandWeightTotal"]
     ext_weight_lookup = ext.set_index("SKU")["OnHandWeightTotal"]
 
-    # ── Move FZ → EXT ────────────────────────────────────────────
+    # ── Move FZ → EXT ───────────────────────────────────────────────────────
     st.subheader("🔄 Move FZ → EXT")
     thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 52.0, 4.0, 0.5, key="w2e_thr")
 
     to_move = fz[fz["WeeksOnHand"] > thr1].copy()
     to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
     to_move["WeightToMove"]     = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
-    to_move["CostToMove"]       = (
-        to_move["WeightToMove"] / to_move["OnHandWeightTotal"]
-    ) * to_move["OnHandCostTotal"]
+    to_move["CostToMove"]       = (to_move["WeightToMove"] / to_move["OnHandWeightTotal"]) * to_move["OnHandCostTotal"]
     to_move["EXT_Weight"]       = to_move["SKU"].map(ext_weight_lookup).fillna(0)
     to_move["TotalOnHand"]      = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
 
@@ -99,14 +101,14 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
 
         buf1 = io.BytesIO()
         mv1.to_excel(buf1, index=False, sheet_name="FZ2EXT")
+        buf1.seek(0)
         st.download_button(
             "Download FZ→EXT List", buf1.getvalue(),
             file_name="FZ2EXT.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-
-    # ── Move EXT → FZ ────────────────────────────────────────────
+    # ── Move EXT → FZ ───────────────────────────────────────────────────────
     st.subheader("🔄 Move EXT → FZ")
     thr2_default = 1.0
     try:
@@ -115,8 +117,10 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     except:
         pass
 
-    thr2 = st.slider("Desired FZ WOH to achieve",
-                     0.0, float(fz_woh.max()), thr2_default, step=0.25, key="e2f_thr")
+    thr2 = st.slider(
+        "Desired FZ WOH to achieve",
+        0.0, float(fz_woh.max()), thr2_default, step=0.25, key="e2f_thr"
+    )
 
     back = ext[ext["SKU"].map(fz_woh).fillna(0) < thr2].copy()
     back["FZ_Weight"]        = back["SKU"].map(fz_weight).fillna(0)
@@ -126,7 +130,6 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     back["CostToReturn"]     = (back["WeightToReturn"] / back["OnHandWeightTotal"]) * back["OnHandCostTotal"]
     back["TotalOnHand"]      = back["OnHandWeightTotal"] + back["FZ_Weight"]
 
-    # PackCount & AvgWeightPerPack are already on df
     total_wt_return   = back["WeightToReturn"].sum()
     total_cost_return = back["CostToReturn"].sum()
 
@@ -174,6 +177,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
 
         buf2 = io.BytesIO()
         back.to_excel(buf2, index=False, sheet_name="EXT2FZ")
+        buf2.seek(0)
         st.download_button(
             "Download EXT→FZ List", buf2.getvalue(),
             file_name="EXT2FZ.xlsx",
