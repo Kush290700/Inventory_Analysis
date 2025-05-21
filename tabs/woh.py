@@ -17,51 +17,55 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     st.sidebar.subheader("Optional: SKU Cost Sheet")
     cost_file = st.sidebar.file_uploader(
         "Upload CSV or XLSX with columns [SKU, NumPacks, WeightLb, Cost]",
-        type=["csv","xlsx"], key="cost_sheet"
+        type=["csv", "xlsx"], key="cost_sheet"
     )
+    
     if cost_file:
-        # read
+        # read cost sheet
         if cost_file.name.lower().endswith("xlsx"):
             cost_df = pd.read_excel(cost_file)
         else:
             cost_df = pd.read_csv(cost_file)
+    
         cost_df.columns = cost_df.columns.str.strip()
         cost_df["SKU"]      = cost_df["SKU"].astype(str)
         cost_df["NumPacks"] = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(0).astype(int)
         cost_df["WeightLb"] = pd.to_numeric(cost_df["WeightLb"], errors="coerce").fillna(0)
-        # strip dollar sign, commas
         cost_df["Cost"]     = (
             cost_df["Cost"]
-                  .astype(str)
-                  .str.replace(r"[\$,]", "", regex=True)
-                  .astype(float)
+                .astype(str)
+                .str.replace(r"[\$,]", "", regex=True)
+                .astype(float)
         )
+    
         # merge onto main df
         df = df.merge(
             cost_df[["SKU", "NumPacks", "WeightLb", "Cost"]],
             on="SKU", how="left"
         )
-        # override the on-hand totals from uploaded sheet
+    
+        # override on-hand totals
         df["OnHandWeightTotal"] = df["WeightLb"]
         df["OnHandCostTotal"]   = df["Cost"]
-        # derive pack counts & avg weight
-        df["PackCount"]         = df["NumPacks"]
-        df["AvgWeightPerPack"]  = (
-            df["OnHandWeightTotal"] /
-            df["PackCount"].replace(0, np.nan)
-        )
+    
+        # build PackCount from NumPacks series
+        pack_counts = df["NumPacks"]
+    
     else:
-        # fallback to existing ItemCount logic
-        df["ItemCount"] = (
-            pd.to_numeric(df.get("ItemCount", 1), errors="coerce")
-              .fillna(1)
-              .astype(int)
-        )
-        df["PackCount"]        = df["ItemCount"]
-        df["AvgWeightPerPack"] = (
-            df["OnHandWeightTotal"] /
-            df["PackCount"].replace(0, np.nan)
-        )
+        # no cost sheet: fallback to ItemCount if present, else all 1s
+        if "ItemCount" in df.columns:
+            pack_counts = pd.to_numeric(df["ItemCount"], errors="coerce")
+        else:
+            pack_counts = pd.Series(1, index=df.index)
+    
+    # now ensure pack_counts is a Series, fill and cast
+    df["PackCount"] = pack_counts.fillna(1).astype(int)
+    
+    # finally compute average weight per pack
+    df["AvgWeightPerPack"] = (
+        df["OnHandWeightTotal"] /
+        df["PackCount"].replace(0, np.nan)
+    )
 
     # ── Precompute FZ & EXT, exclude zero-usage ───────────────────────────
     fz  = df[
