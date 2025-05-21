@@ -2,13 +2,19 @@ import pandas as pd
 import numpy as np
 from typing import Tuple
 
-def compute_threshold_move(df: pd.DataFrame, threshold: float = 4.0) -> pd.DataFrame:
+def compute_threshold_move(ext_df: pd.DataFrame, hc_df: pd.DataFrame) -> float:
     """
-    Mark items with WeeksOnHand > threshold for moving out.
+    Given the EXT‐state inventory and
+    the holding‐cost calculation (hc_df),
+    return a recommended Weeks-On-Hand threshold.
+    For example, pick the median EXT WOH:
     """
-    tmp = df.copy()
-    tmp["ToMove"] = tmp["WeeksOnHand"] > threshold
-    return tmp
+    # only look at SKUs present in hc_df
+    common = ext_df[ext_df["SKU"].isin(hc_df["SKU"])]
+    if common.empty:
+        return 1.0
+    # here we pick the 50th percentile of EXT WeeksOnHand
+    return common["WeeksOnHand"].median()
 
 
 def classify_movement(df: pd.DataFrame, quantile: float = 0.5) -> pd.DataFrame:
