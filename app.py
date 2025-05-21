@@ -67,8 +67,8 @@ def load_everything(uploaded_xlsx):
     # 5) raw “Mikuni” sheet
     mikuni_df = sheets.get("Mikuni", pd.DataFrame())
 
-    # return all, including cost_df for WOH tab
-    return df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df
+    # Return everything *including* prod_df so we can fill missing Protein
+    return df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df
 
 # ──────────────────────────────────────────────────────────────
 # 3) Sidebar — uploader + filters + nav
@@ -79,10 +79,17 @@ if not raw_file:
     st.sidebar.warning("Please upload your master .xlsx to begin.")
     st.stop()
 
-df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df = load_everything(raw_file)
+# Unpack prod_df too
+df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df = load_everything(raw_file)
+
+# ─ Fill missing Protein from prod_df ──────────────────────────────────────
+# Build mapping SKU → Protein from your production sheet
+prod_map = prod_df.set_index("SKU")["Protein"].to_dict()
+# Wherever df_woh.Protein is null, fill from prod_map
+df_woh["Protein"] = df_woh["Protein"].fillna(df_woh["SKU"].map(prod_map))
 
 # unified filters for WOH‐based tabs
-prot_opts  = ["All"] + sorted(df_woh["Protein"].unique())
+prot_opts  = ["All"] + sorted(df_woh["Protein"].fillna("Unknown").unique())
 state_opts = ["All"] + sorted(df_woh["ProductState"].unique())
 sku_opts   = ["All"] + sorted(df_woh["SKU_Desc"].unique())
 
@@ -91,9 +98,9 @@ f_s = st.sidebar.selectbox("State",   state_opts)
 f_k = st.sidebar.selectbox("SKU",     sku_opts)
 
 mask = (
-    ((f_p=="All") | (df_woh["Protein"]      == f_p)) &
-    ((f_s=="All") | (df_woh["ProductState"] == f_s)) &
-    ((f_k=="All") | (df_woh["SKU_Desc"]      == f_k))
+    ((f_p  == "All") | (df_woh["Protein"]      == f_p)) &
+    ((f_s  == "All") | (df_woh["ProductState"] == f_s)) &
+    ((f_k  == "All") | (df_woh["SKU_Desc"]      == f_k))
 )
 df = df_woh[mask].copy()
 
@@ -117,15 +124,20 @@ section = st.sidebar.radio(
 # ──────────────────────────────────────────────────────────────
 if section == "📈 KPIs":
     kpis.render(df, df_hc, apply_theme)
+
 elif section == "📊 WOH":
     # pass cost_df so the WOH tab can map NumPacks correctly
     woh.render(df, df_hc, cost_df, apply_theme)
+
 elif section == "🚀 Movers":
     movers.render(df, apply_theme)
+
 elif section == "💰 Holding Cost":
     holding_cost.render(df_hc, apply_theme)
+
 elif section == "🔎 Insights":
     insights.render(df, df_hc, apply_theme)
+
 elif section == "🗺 Bin Scan":
     # now passing both Inventory Detail1 + Mikuni
     bin_scan.render(inv1_df, mikuni_df, apply_theme)
