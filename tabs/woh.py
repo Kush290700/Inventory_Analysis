@@ -20,6 +20,9 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         type=["csv", "xlsx"], key="cost_sheet"
     )
     
+    # always ensure we have a clean “key” for merging
+    df["SKU_key"] = df["SKU"].astype(str).str.extract(r"^(\d+)")[0]
+    
     if cost_file:
         # read cost sheet
         if cost_file.name.lower().endswith("xlsx"):
@@ -27,9 +30,14 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         else:
             cost_df = pd.read_csv(cost_file)
     
+        # normalize cost sheet
         cost_df.columns = cost_df.columns.str.strip()
         cost_df["SKU"]      = cost_df["SKU"].astype(str)
-        cost_df["NumPacks"] = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(0).astype(int)
+        cost_df["NumPacks"] = (
+            pd.to_numeric(cost_df["NumPacks"], errors="coerce")
+              .fillna(0)
+              .astype(int)
+        )
         cost_df["WeightLb"] = pd.to_numeric(cost_df["WeightLb"], errors="coerce").fillna(0)
         cost_df["Cost"]     = (
             cost_df["Cost"]
@@ -38,35 +46,37 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
                 .astype(float)
         )
     
-        # merge onto main df
+        # merge on the extracted numeric key
         df = df.merge(
-            cost_df[["SKU", "NumPacks", "WeightLb", "Cost"]],
-            on="SKU", how="left"
+            cost_df.rename(columns={"SKU":"SKU_cost"})[["SKU_cost","NumPacks","WeightLb","Cost"]],
+            left_on="SKU_key", right_on="SKU_cost",
+            how="left"
         )
     
-        # override on-hand totals
+        # override on-hand totals from the sheet
         df["OnHandWeightTotal"] = df["WeightLb"]
         df["OnHandCostTotal"]   = df["Cost"]
     
-        # build PackCount from NumPacks series
+        # pack count comes directly from NumPacks
         pack_counts = df["NumPacks"]
-    
     else:
-        # no cost sheet: fallback to ItemCount if present, else all 1s
+        # fallback: use existing ItemCount or default to 1
         if "ItemCount" in df.columns:
             pack_counts = pd.to_numeric(df["ItemCount"], errors="coerce")
         else:
             pack_counts = pd.Series(1, index=df.index)
     
-    # now ensure pack_counts is a Series, fill and cast
+    # now safely build PackCount as a Series
     df["PackCount"] = pack_counts.fillna(1).astype(int)
     
-    # finally compute average weight per pack
+    # compute average weight per pack
     df["AvgWeightPerPack"] = (
         df["OnHandWeightTotal"] /
         df["PackCount"].replace(0, np.nan)
     )
-
+    
+    # drop the helper column if you like
+    df.drop(columns=["SKU_key","SKU_cost"], errors="ignore", inplace=True)
     # ── Precompute FZ & EXT, exclude zero-usage ───────────────────────────
     fz  = df[
         (df["ProductState"].str.upper().str.startswith("FZ")) &
