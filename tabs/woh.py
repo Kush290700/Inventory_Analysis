@@ -17,7 +17,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     st.sidebar.subheader("Optional: SKU Cost Sheet")
     cost_file = st.sidebar.file_uploader(
         "Upload CSV/XLSX with columns [SKU, NumPacks, WeightLb, Cost]",
-        type=["csv", "xlsx"], key="cost_sheet"
+        type=["csv", "xlsx"], key="Cost Value"
     )
 
     if cost_file:
