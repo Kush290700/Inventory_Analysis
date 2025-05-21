@@ -196,10 +196,16 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
-    # ── Distribution of WOH ─────────────────────────────────────
+       # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of WOH")
-    bin_count = st.slider("Number of bins (WOH dist)", 10, 100, 40, step=5, key="woh_bins")
-    wo_max    = st.slider(
+
+    # renamed the key here to avoid duplicate
+    dist_bins = st.slider(
+        "Number of bins (WOH dist)",
+        min_value=10, max_value=100, value=40, step=5,
+        key="woh_dist_bins"
+    )
+    wo_max = st.slider(
         "Max WOH (weeks) to display",
         float(df["WeeksOnHand"].min()),
         float(df["WeeksOnHand"].quantile(0.99)),
@@ -207,13 +213,14 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         step=1.0,
         key="woh_max"
     )
+
     filtered = df[df["WeeksOnHand"] <= wo_max]
 
     hist = (
         alt.Chart(filtered)
         .mark_bar(opacity=0.6)
         .encode(
-            x=alt.X("WeeksOnHand:Q", bin=alt.Bin(maxbins=bin_count), title="WOH (weeks)"),
+            x=alt.X("WeeksOnHand:Q", bin=alt.Bin(maxbins=dist_bins), title="WOH (weeks)"),
             y=alt.Y("count():Q", title="Count of SKUs"),
             tooltip=[
                 alt.Tooltip("count():Q", title="Count"),
@@ -228,7 +235,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
             as_=["WeeksOnHand", "density"],
             extent=[0, wo_max],
             counts=True,
-            steps=bin_count
+            steps=dist_bins
         )
         .mark_line(color="orange", size=3)
         .encode(
@@ -247,7 +254,6 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         theme((hist + dens + mean_rule + median_rule).properties(height=350).interactive()),
         use_container_width=True
     )
-    st.markdown("**Red** = mean • **Blue (dashed)** = median • **Orange** = density")
 
     # ── Annual Turns Distribution ───────────────────────────────
     st.subheader("Annual Turns Distribution")
