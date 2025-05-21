@@ -13,10 +13,16 @@ from utils.classification import compute_threshold_move
 def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     st.header("📊 Weeks-On-Hand Analysis")
 
- # ── Ensure ItemCount is set ───────────────────────────────────────────
+    # ── Ensure ItemCount is set ───────────────────────────────────────────
+    if "ItemCount" in df.columns:
+        item_counts = df["ItemCount"]
+    else:
+        # make a Series of 1s, same length as df
+        item_counts = pd.Series(1, index=df.index)
+
     df["ItemCount"] = (
-        pd.to_numeric(df.get("ItemCount", 1), errors="coerce")
-          .fillna(1)
+        pd.to_numeric(item_counts, errors="coerce")
+          .fillna(1)       # now safe, because item_counts is a Series
           .astype(int)
     )
 
