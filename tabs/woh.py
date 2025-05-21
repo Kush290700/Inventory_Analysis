@@ -13,48 +13,55 @@ from utils.classification import compute_threshold_move
 def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     st.header("📊 Weeks-On-Hand Analysis")
 
-        # ── Cost Sheet Upload & Merge ─────────────────────────────────────────
+    # ── Cost Sheet Upload & Merge ─────────────────────────────────────────
     st.sidebar.subheader("Optional: SKU Cost Sheet")
     cost_file = st.sidebar.file_uploader(
-        "Upload CSV or XLSX with columns [SKU, NumPacks, WeightLb, Cost]",
-        type=["csv", "xlsx"], key="Cost Value"
+        "Upload CSV/XLSX with columns [SKU, NumPacks, WeightLb, Cost]",
+        type=["csv", "xlsx"], key="cost_sheet"
     )
-
-    # build a numeric SKU key for merging
-    df["SKU_key"] = df["SKU"].astype(str).str.extract(r"^(\d+)")[0]
 
     if cost_file:
         # read cost sheet
-        if cost_file.name.lower().endswith("xlsx"):
+        if cost_file.name.lower().endswith(".xlsx"):
             cost_df = pd.read_excel(cost_file)
         else:
             cost_df = pd.read_csv(cost_file)
         cost_df.columns = cost_df.columns.str.strip()
 
-        # normalize
-        cost_df["SKU"]       = cost_df["SKU"].astype(str)
-        cost_df["NumPacks"]  = pd.to_numeric(cost_df.get("NumPacks", 0), errors="coerce").fillna(0).astype(int)
+        # normalize cost sheet
+        cost_df["SKU"]       = cost_df["SKU"].astype(str).str.strip()
+        cost_df["NumPacks"]  = (
+            pd.to_numeric(cost_df.get("NumPacks", 0), errors="coerce")
+              .fillna(0)
+              .astype(int)
+        )
         cost_df["WeightLb"]  = pd.to_numeric(cost_df.get("WeightLb", 0), errors="coerce").fillna(0)
-        cost_df["Cost"] = (
-            cost_df["Cost"]
+        # if your column is named "Cost Value", adjust here:
+        cost_col = "Cost Value" if "Cost Value" in cost_df.columns else "Cost"
+        cost_df["CostValue"] = (
+            cost_df[cost_col]
               .astype(str)
               .str.replace(r"[\$,]", "", regex=True)
               .astype(float)
         )
 
-        # merge on the numeric key
+        # trim SKU in main df and cost_df to match exactly
+        df["SKU"]    = df["SKU"].astype(str).str.strip()
+
+        # merge directly on SKU
         df = df.merge(
-            cost_df.rename(columns={"SKU":"SKU_cost"})[["SKU_cost","NumPacks","WeightLb","Cost"]],
-            left_on="SKU_key", right_on="SKU_cost",
-            how="left"
+            cost_df[["SKU","NumPacks","WeightLb","CostValue"]],
+            on="SKU", how="left"
         )
 
-        # override on-hand from sheet
+        # override on-hand totals
         df["OnHandWeightTotal"] = df["WeightLb"]
-        df["OnHandCostTotal"]   = df["Cost"]
+        df["OnHandCostTotal"]   = df["CostValue"]
+
+        # base pack counts from uploaded sheet
         pack_counts = df["NumPacks"]
     else:
-        # fallback to ItemCount or default 1
+        # fallback to existing ItemCount or default to 1
         if "ItemCount" in df.columns:
             pack_counts = pd.to_numeric(df["ItemCount"], errors="coerce")
         else:
@@ -67,17 +74,13 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         df["PackCount"].replace(0, np.nan)
     )
 
-    # clean up helper columns
-    df.drop(columns=["SKU_key","SKU_cost"], errors="ignore", inplace=True)
-
-
     # ── Precompute FZ & EXT, exclude zero-usage ───────────────────────────
     fz  = df[
-        (df["ProductState"].str.upper().str.startswith("FZ")) &
+        df["ProductState"].str.upper().str.startswith("FZ") &
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
     ext = df[
-        (df["ProductState"].str.upper().str.startswith("EXT")) &
+        df["ProductState"].str.upper().str.startswith("EXT") &
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
 
@@ -86,17 +89,18 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     fz_weight         = fz.set_index("SKU")["OnHandWeightTotal"]
     ext_weight_lookup = ext.set_index("SKU")["OnHandWeightTotal"]
 
-
     # ── Move FZ → EXT ────────────────────────────────────────────
     st.subheader("🔄 Move FZ → EXT")
     thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 52.0, 4.0, 0.5, key="w2e_thr")
 
     to_move = fz[fz["WeeksOnHand"] > thr1].copy()
-    to_move["DesiredFZ_Weight"]   = to_move["AvgWeeklyUsage"] * thr1
-    to_move["WeightToMove"]       = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
-    to_move["CostToMove"]         = (to_move["WeightToMove"] / to_move["OnHandWeightTotal"]) * to_move["OnHandCostTotal"]
-    to_move["EXT_Weight"]         = to_move["SKU"].map(ext_weight_lookup).fillna(0)
-    to_move["TotalOnHand"]        = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
+    to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
+    to_move["WeightToMove"]     = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
+    to_move["CostToMove"]       = (
+        to_move["WeightToMove"] / to_move["OnHandWeightTotal"]
+    ) * to_move["OnHandCostTotal"]
+    to_move["EXT_Weight"]       = to_move["SKU"].map(ext_weight_lookup).fillna(0)
+    to_move["TotalOnHand"]      = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
 
     mv_pos        = to_move["WeightToMove"] > 0
     total_wt_move = to_move.loc[mv_pos, "WeightToMove"].sum()
@@ -147,12 +151,9 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         buf1 = io.BytesIO()
         mv1.to_excel(buf1, index=False, sheet_name="FZ2EXT")
         buf1.seek(0)
-        st.download_button(
-            "Download FZ→EXT List", buf1.getvalue(),
-            file_name="FZ2EXT.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
+        st.download_button("Download FZ→EXT List", buf1.getvalue(),
+                           file_name="FZ2EXT.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     # ── Move EXT → FZ ────────────────────────────────────────────
     st.subheader("🔄 Move EXT → FZ")
@@ -170,15 +171,11 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     back["FZ_Weight"]        = back["SKU"].map(fz_weight).fillna(0)
     back["FZ_WOH"]           = back["SKU"].map(fz_woh).fillna(0)
     back["DesiredFZ_Weight"] = back["AvgWeeklyUsage"] * thr2
-    back["WeightToReturn"]   = (
-        back["DesiredFZ_Weight"] - back["FZ_Weight"]
-    ).clip(lower=0, upper=back["OnHandWeightTotal"])
+    back["WeightToReturn"]   = back["DesiredFZ_Weight"].sub(back["FZ_Weight"]).clip(0, back["OnHandWeightTotal"])
     back["CostToReturn"]     = (back["WeightToReturn"] / back["OnHandWeightTotal"]) * back["OnHandCostTotal"]
     back["TotalOnHand"]      = back["OnHandWeightTotal"] + back["FZ_Weight"]
 
-    back["PackCount"]        = back["PackCount"]
-    back["AvgWeightPerPack"] = back["AvgWeightPerPack"]
-
+    # reuse PackCount & AvgWt/Pack from above
     total_wt_return   = back["WeightToReturn"].sum()
     total_cost_return = back["CostToReturn"].sum()
 
@@ -227,11 +224,9 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         buf2 = io.BytesIO()
         back.to_excel(buf2, index=False, sheet_name="EXT2FZ")
         buf2.seek(0)
-        st.download_button(
-            "Download EXT→FZ List", buf2.getvalue(),
-            file_name="EXT2FZ.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("Download EXT→FZ List", buf2.getvalue(),
+                           file_name="EXT2FZ.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of WOH")
