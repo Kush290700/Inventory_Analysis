@@ -13,28 +13,39 @@ from utils.classification import compute_threshold_move
 def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     st.header("📊 Weeks-On-Hand Analysis")
 
-    # ── Compute PackCount & AvgWeightPerPack ───────────────────────────────
-    # Use NumPacks from your Cost Value sheet if present, else fallback to ItemCount, else 1
-    if "NumPacks" in df.columns:
-        packs = pd.to_numeric(df["NumPacks"], errors="coerce")
-    elif "ItemCount" in df.columns:
-        packs = pd.to_numeric(df["ItemCount"], errors="coerce")
+        # ── Bring in pack counts from your Cost Value sheet ────────────────
+    # ensure cost_df["NumPacks"] is numeric
+    if "NumPacks" in cost_df.columns:
+        packs_series = (
+            pd.to_numeric(cost_df["NumPacks"], errors="coerce")
+              .fillna(0)
+              .astype(int)
+        )
+        # map by SKU
+        cost_packs = pd.Series(packs_series.values, index=cost_df["SKU"].astype(str))
+        packs = df["SKU"].astype(str).map(cost_packs)
     else:
-        packs = pd.Series(1, index=df.index)
+        packs = pd.Series(np.nan, index=df.index)
 
-    df["PackCount"] = packs.fillna(1).astype(int)
+    # fallback to ItemCount if available, else 1
+    if "ItemCount" in df.columns:
+        itemcnt = pd.to_numeric(df["ItemCount"], errors="coerce").fillna(1).astype(int)
+    else:
+        itemcnt = pd.Series(1, index=df.index)
+
+    df["PackCount"] = packs.fillna(itemcnt).astype(int)
     df["AvgWeightPerPack"] = (
         df["OnHandWeightTotal"] /
         df["PackCount"].replace(0, np.nan)
     )
 
-    # ── Precompute FZ & EXT, exclude zero-usage ─────────────────────────────
+    # ── Precompute FZ & EXT, exclude zero-usage ───────────────────────────
     fz  = df[
-        (df["ProductState"].str.upper().str.startswith("FZ")) &
+        df["ProductState"].str.upper().str.startswith("FZ") &
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
     ext = df[
-        (df["ProductState"].str.upper().str.startswith("EXT")) &
+        df["ProductState"].str.upper().str.startswith("EXT") &
         (df["AvgWeeklyUsage"] > 0)
     ].copy()
 
@@ -42,14 +53,16 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
     fz_weight         = fz.set_index("SKU")["OnHandWeightTotal"]
     ext_weight_lookup = ext.set_index("SKU")["OnHandWeightTotal"]
 
-    # ── Move FZ → EXT ───────────────────────────────────────────────────────
+    # ── Move FZ → EXT ─────────────────────────────────────────────────────
     st.subheader("🔄 Move FZ → EXT")
     thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 52.0, 4.0, 0.5, key="w2e_thr")
 
     to_move = fz[fz["WeeksOnHand"] > thr1].copy()
     to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
     to_move["WeightToMove"]     = to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]
-    to_move["CostToMove"]       = (to_move["WeightToMove"] / to_move["OnHandWeightTotal"]) * to_move["OnHandCostTotal"]
+    to_move["CostToMove"]       = (
+        to_move["WeightToMove"] / to_move["OnHandWeightTotal"]
+    ) * to_move["OnHandCostTotal"]
     to_move["EXT_Weight"]       = to_move["SKU"].map(ext_weight_lookup).fillna(0)
     to_move["TotalOnHand"]      = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
 
@@ -108,7 +121,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-    # ── Move EXT → FZ ───────────────────────────────────────────────────────
+    # ── Move EXT → FZ ─────────────────────────────────────────────────────
     st.subheader("🔄 Move EXT → FZ")
     thr2_default = 1.0
     try:
