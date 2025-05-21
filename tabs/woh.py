@@ -16,8 +16,8 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, theme):
         # ── Cost Sheet Upload & Merge ─────────────────────────────────────────
     st.sidebar.subheader("Optional: SKU Cost Sheet")
     cost_file = st.sidebar.file_uploader(
-        "Upload CSV or XLSX with columns [SKU, NumPacks, WeightLb, Cost Value]",
-        type=["csv", "xlsx"], key="cost_sheet"
+        "Upload CSV or XLSX with columns [SKU, NumPacks, WeightLb, Cost]",
+        type=["csv", "xlsx"], key="Cost Value"
     )
 
     # build a numeric SKU key for merging
