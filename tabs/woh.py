@@ -216,44 +216,54 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         .agg({
             "AvgWeeklyUsage":    "mean",
             "OnHandWeightTotal": "sum",
-            "OnHandCostTotal":   "sum",
-            "AvgWeightPerPack":  "first"
+            "OnHandCostTotal":   "sum"
         })
         .rename(columns={
-            "AvgWeeklyUsage":    "AvgUse",
-            "OnHandWeightTotal": "OnHandWt",
-            "OnHandCostTotal":   "OnHandCost",
-            "AvgWeightPerPack":  "PackWt"
+            "AvgWeeklyUsage":    "MeanUse",
+            "OnHandWeightTotal": "InvWt",
+            "OnHandCostTotal":   "InvCost"
         })
     )
     
-    # 3) Compute pounds needed
-    inv["DesiredWt"] = inv["AvgUse"] * desired_woh
-    inv["ToBuyWt"]  = (inv["DesiredWt"] - inv["OnHandWt"]).clip(lower=0)
+    # 3) Map pack‐count from cost_df
+    if "NumPacks" in df_cost.columns:
+        packs_series = (
+            pd.to_numeric(df_cost["NumPacks"], errors="coerce")
+              .fillna(1)
+              .astype(int)
+        )
+        pack_map = pd.Series(packs_series.values, index=df_cost["SKU"].astype(str))
+        inv["PackCount"] = inv["SKU"].astype(str).map(pack_map).fillna(1).astype(int)
+    else:
+        inv["PackCount"] = 1
     
-    # 4) Cost per pound
-    inv["CostPerLb"] = inv["OnHandCost"] / inv["OnHandWt"]
+    # 4) Compute weight per pack
+    inv["PackWt"] = inv["InvWt"] / inv["PackCount"]
     
-    # 5) Packs & rounded order weight
-    pack_wt = inv["PackWt"].replace(0, np.nan)
-    inv["PacksToOrder"] = np.ceil(inv["ToBuyWt"] / pack_wt.fillna(inv["ToBuyWt"])).astype(int)
-    inv["OrderWt"]      = inv["PacksToOrder"] * pack_wt.fillna(inv["ToBuyWt"])
+    # 5) Pounds needed to hit desired_woh
+    inv["DesiredWt"] = inv["MeanUse"] * desired_woh
+    inv["ToBuyWt"]   = (inv["DesiredWt"] - inv["InvWt"]).clip(lower=0)
     
-    # 6) Estimated spend
-    inv["EstCost"] = inv["OrderWt"] * inv["CostPerLb"]
+    # 6) Packs to order (round up to whole packs) & actual order weight
+    inv["PacksToOrder"] = np.ceil(inv["ToBuyWt"] / inv["PackWt"]).astype(int)
+    inv["OrderWt"]      = inv["PacksToOrder"] * inv["PackWt"]
     
-    # 7) Sort: high-usage first, then by cost
-    inv = inv.sort_values(["AvgUse", "EstCost"], ascending=[False, True])
+    # 7) Cost calculations
+    inv["CostPerLb"] = inv["InvCost"] / inv["InvWt"]
+    inv["EstCost"]   = inv["OrderWt"] * inv["CostPerLb"]
     
-    # 8) Display the essentials
+    # 8) Sort high‐usage first
+    inv = inv.sort_values(["MeanUse","EstCost"], ascending=[False, True])
+    
+    # 9) Display essentials
     display = (
         inv[[
           "SKU","SKU_Desc",
-          "OnHandWt","DesiredWt",
-          "OrderWt","PacksToOrder","EstCost"
+          "InvWt","DesiredWt",
+          "PackCount","PacksToOrder","OrderWt","EstCost"
         ]]
         .assign(
-          OnHandWt=lambda x: x["OnHandWt"].map("{:,.0f} lb".format),
+          InvWt=lambda x: x["InvWt"].map("{:,.0f} lb".format),
           DesiredWt=lambda x: x["DesiredWt"].map("{:,.0f} lb".format),
           OrderWt=lambda x: x["OrderWt"].map("{:,.0f} lb".format),
           EstCost=lambda x: x["EstCost"].map("${:,.2f}".format)
@@ -261,7 +271,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
     )
     st.dataframe(display, use_container_width=True)
     
-    # 9) Downloadable order plan
+    # 10) Downloadable order plan
     buf = io.BytesIO()
     inv.to_excel(buf, index=False, sheet_name="PurchasePlan")
     buf.seek(0)
@@ -270,7 +280,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         data=buf.getvalue(),
         file_name="Purchase_Plan.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+
 
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of Weeks-On-Hand")
