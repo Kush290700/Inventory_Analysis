@@ -5,6 +5,8 @@ import pandas as pd
 import sys, os
 import numpy as np
 from prophet import Prophet
+from math import ceil
+
 
 # ensure the project root is on the path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -195,7 +197,71 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
             file_name="EXT2FZ.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        
+
+    # ── Purchase Recommendations ─────────────────────────────────────────────
+    st.subheader("🛒 Purchase Recommendations")
+    
+    # 1) Choose your target WOH
+    target_woh = st.slider(
+        "Target Weeks-On-Hand for replenishment",
+        min_value=0.0, max_value=52.0, value=2.0, step=0.5, key="purchase_woh"
+    )
+    
+    # 2) Compute current WOH, usage & on-hand weight (you already have these)
+    #    Assuming df has columns: SKU, SKU_Desc, AvgWeeklyUsage, WeeksOnHand, OnHandWeightTotal, PackCount, AvgWeightPerPack
+    
+    need = df.copy()
+    
+    # 3) Only consider SKUs where current WOH < target
+    need = need[ need["WeeksOnHand"] < target_woh ].copy()
+    
+    # 4) How much weight you want on hand: 
+    need["DesiredWeight"] = need["AvgWeeklyUsage"] * target_woh
+    
+    # 5) Therefore, the weight to purchase (= max(0, Desired – OnHand))
+    need["WeightToBuy"] = (need["DesiredWeight"] - need["OnHandWeightTotal"]).clip(lower=0)
+    
+    # 6) Compute number of packs (fall back to 1-unit packs if AvgWeightPerPack missing/zero)
+    need["PackWeight"] = need["AvgWeightPerPack"].replace(0, np.nan)
+    need["PacksToBuy"] = np.ceil( need["WeightToBuy"] / need["PackWeight"].fillna(need["WeightToBuy"]) )
+    need["PacksToBuy"] = need["PacksToBuy"].fillna(1).astype(int)
+    
+    # 7) Align purchase weight up to full packs
+    need["PurchaseWeight"] = need["PacksToBuy"] * need["PackWeight"].fillna(need["WeightToBuy"])
+    
+    # 8) Estimate cost per pound from your on-hand data
+    need["CostPerLb"] = need["OnHandCostTotal"] / need["OnHandWeightTotal"]
+    
+    # 9) Estimated spend
+    need["EstCost"] = need["PurchaseWeight"] * need["CostPerLb"]
+    
+    # 10) Show a tidy table
+    cols = [
+        "SKU", "SKU_Desc",
+        "WeeksOnHand", "AvgWeeklyUsage",
+        "OnHandWeightTotal", "DesiredWeight", "PurchaseWeight",
+        "PacksToBuy", "EstCost"
+    ]
+    st.dataframe(
+        need[cols]
+          .sort_values("EstCost", ascending=False)
+          .assign(
+             EstCost=lambda d: d["EstCost"].map("${:,.2f}".format),
+             PurchaseWeight=lambda d: d["PurchaseWeight"].map("{:,.0f} lb".format)
+          )
+    )
+    
+    # 11) Downloadable order list
+    buf = io.BytesIO()
+    need[cols].to_excel(buf, index=False, sheet_name="ToPurchase")
+    buf.seek(0)
+    st.download_button(
+        "📥 Download Purchase List",
+        data=buf.getvalue(),
+        file_name="Purchase_Recommendations.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of Weeks-On-Hand")
 
