@@ -232,7 +232,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
               .fillna(1)
               .astype(int)
         )
-        pack_map = pd.Series(packs_series.values, index=df_cost["SKU"].astype(str))
+        pack_map = pd.Series(packs_series.values, index=cost_df["SKU"].astype(str))
         inv["PackCount"] = inv["SKU"].astype(str).map(pack_map).fillna(1).astype(int)
     else:
         inv["PackCount"] = 1
