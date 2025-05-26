@@ -226,9 +226,9 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
     )
     
     # 3) Map pack‐count from cost_df
-    if "NumPacks" in df_cost.columns:
+    if "NumPacks" in cost_df.columns:
         packs_series = (
-            pd.to_numeric(df_cost["NumPacks"], errors="coerce")
+            pd.to_numeric(cost_df["NumPacks"], errors="coerce")
               .fillna(1)
               .astype(int)
         )
