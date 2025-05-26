@@ -113,12 +113,27 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         )
         st.altair_chart(theme(chart1), use_container_width=True)
 
+      # 1) Define exactly the columns you want
+        export_cols_fz2ext = [
+            "SKU_Desc", "ProductState", "Supplier",
+            "OnHandWeightTotal", "TotalShippedLb", "TotalProductionLb",
+            "TotalUsage", "AvgWeeklyUsage", "WeeksOnHand",
+            "PackCount", "DesiredFZ_Weight", "WeightToMove", "EXT_Weight"
+        ]
+    
+        # 2) Build a pared‐down DataFrame (you may need to rename your columns if they differ)
+        mv1_export = mv1.rename(columns={"ProductState":"ProductState",
+                                         "EXT_Weight":"EXT_Weight"})  # ensure column names match
+        mv1_export = mv1_export[export_cols_fz2ext]
+    
+        # 3) Write that to Excel & expose download
         buf1 = io.BytesIO()
-        mv1.to_excel(buf1, index=False, sheet_name="FZ2EXT")
+        mv1_export.to_excel(buf1, index=False, sheet_name="FZ2EXT")
         buf1.seek(0)
         st.download_button(
-            "Download FZ→EXT List", buf1.getvalue(),
-            file_name="FZ2EXT.xlsx",
+            "Download FZ→EXT List",
+            buf1.getvalue(),
+            file_name="FZ2EXT_SelectedCols.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
@@ -189,14 +204,26 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         )
         st.altair_chart(theme(chart2), use_container_width=True)
 
-        buf2 = io.BytesIO()
-        back.to_excel(buf2, index=False, sheet_name="EXT2FZ")
-        buf2.seek(0)
-        st.download_button(
-            "Download EXT→FZ List", buf2.getvalue(),
-            file_name="EXT2FZ.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        export_cols_ext2fz = [
+                "SKU_Desc", "ProductState", "Supplier",
+                "OnHandWeightTotal", "TotalShippedLb", "TotalProductionLb",
+                "TotalUsage", "AvgWeeklyUsage", "WeeksOnHand",
+                "PackCount", "DesiredFZ_Weight", "WeightToReturn", "FZ_Weight"
+            ]
+        
+            back_export = back.rename(columns={"ProductState":"ProductState",
+                                               "FZ_Weight":"FZ_Weight"})
+            back_export = back_export[export_cols_ext2fz]
+        
+            buf2 = io.BytesIO()
+            back_export.to_excel(buf2, index=False, sheet_name="EXT2FZ")
+            buf2.seek(0)
+            st.download_button(
+                "Download EXT→FZ List",
+                buf2.getvalue(),
+                file_name="EXT2FZ_SelectedCols.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
     
     # ── Purchase Recommendations by Desired WOH ──────────────────────────────
