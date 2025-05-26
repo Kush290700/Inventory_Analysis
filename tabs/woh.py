@@ -14,10 +14,11 @@ from utils.classification import compute_threshold_move
 
 # Render function for Weeks-On-Hand Analysis tab
 
-def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme: Callable):
+def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
     st.header("📊 Weeks-On-Hand Analysis")
 
     # ── Compute PackCount & AvgWeightPerPack ───────────────────────────────
+    # Map NumPacks from cost_df by SKU
     if "NumPacks" in cost_df.columns:
         packs_series = (
             pd.to_numeric(cost_df["NumPacks"], errors="coerce")
@@ -25,9 +26,9 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme: 
               .astype(int)
         )
         pack_map = pd.Series(packs_series.values, index=cost_df["SKU"].astype(str))
-        df["PackCount"] = df["SKU"].astype(str).map(pack_map)
+        packs = df["SKU"].astype(str).map(pack_map)
     else:
-        df["PackCount"] = np.nan
+        packs = pd.Series(np.nan, index=df.index)
 
     # fallback to ItemCount if available, else to 1
     if "ItemCount" in df.columns:
@@ -35,16 +36,18 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme: 
     else:
         item_counts = pd.Series(1, index=df.index)
 
-    df["PackCount"] = df["PackCount"].fillna(item_counts).astype(int)
+    df["PackCount"] = packs.fillna(item_counts).astype(int)
     df["AvgWeightPerPack"] = (
-        df["OnHandWeightTotal"] / df["PackCount"].replace(0, np.nan)
+        df["OnHandWeightTotal"] /
+        df["PackCount"].replace(0, np.nan)
     )
 
-    # ── Precompute FZ & EXT groups ───────────────────────────────────────────
-    fz = df[(df["ProductState"].str.upper().str.startswith("FZ")) & (df["AvgWeeklyUsage"] > 0)].copy()
-    ext = df[(df["ProductState"].str.upper().str.startswith("EXT")) & (df["AvgWeeklyUsage"] > 0)].copy()
+    # ── Precompute FZ & EXT datasets ─────────────────────────────────────────
+    fz = df[(df["ProductState"].str.upper().str.startswith("FZ")) &
+             (df["AvgWeeklyUsage"] > 0)].copy()
+    ext = df[(df["ProductState"].str.upper().str.startswith("EXT")) &
+             (df["AvgWeeklyUsage"] > 0)].copy()
     fz_woh = fz.set_index("SKU")["WeeksOnHand"]
-    fz_weight = fz.set_index("SKU")["OnHandWeightTotal"]
     ext_weight_lookup = ext.set_index("SKU")["OnHandWeightTotal"]
 
     # ── Move FZ → EXT ───────────────────────────────────────────────────────
@@ -60,11 +63,18 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme: 
     mv_pos = to_move["WeightToMove"] > 0
     mv1 = to_move[mv_pos]
 
-    # Metrics
+    # Display metrics
+    total_wt_move = mv1["WeightToMove"].sum()
+    total_cost_move = ((mv1["WeightToMove"] / mv1["OnHandWeightTotal"]) * mv1["OnHandCostTotal"]).sum()
     c1, c2, c3 = st.columns(3)
     c1.metric("SKUs to Move", mv1["SKU"].nunique())
-    c2.metric("Total Weight to Move", f"{mv1['WeightToMove'].sum():,.0f} lb")
-    c3.metric("Total Cost to Move",   f"${(mv1['WeightToMove']/mv1['OnHandWeightTotal']*mv1['OnHandCostTotal']).sum():,.0f}")
+    c2.metric("Total Weight to Move", f"{total_wt_move:,.0f} lb")
+    c3.metric("Total Cost to Move", f"${total_cost_move:,.0f}")
+
+    # Supplier filter
+    suppliers = sorted(mv1["Supplier"].dropna().unique())
+    sel_sup = st.multiselect("Filter Suppliers", suppliers, default=suppliers, key="mv1_sups")
+    mv1 = mv1[mv1["Supplier"].isin(sel_sup)]
 
     # Chart
     if not mv1.empty:
@@ -84,7 +94,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme: 
                     alt.Tooltip("OnHandWeightTotal:Q", format=",.0f", title="FZ On-Hand Wt"),
                     alt.Tooltip("EXT_Weight:Q", format=",.0f", title="EXT On-Hand Wt"),
                     alt.Tooltip("TotalOnHand:Q", format=",.0f", title="Total On-Hand Wt"),
-                    alt.Tooltip("PackCount:Q", title="Packs Available"),
+                    alt.Tooltip("PackCount:Q", title="Case or Packs Available"),
                     alt.Tooltip("AvgWeightPerPack:Q", format=",.1f", title="Avg Wt/Pack"),
                     alt.Tooltip("DesiredFZ_Weight:Q", format=",.0f", title="Desired FZ Wt"),
                     alt.Tooltip("WeightToMove:Q", format=",.0f", title="Weight to Move"),
@@ -97,20 +107,18 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme: 
         )
         st.altair_chart(theme(chart1), use_container_width=True)
 
-    # Download FZ→EXT List with selected columns
+    # Download FZ→EXT with selected cols
     if not mv1.empty:
         export_cols = [
             "SKU_Desc", "ProductState", "Supplier", "OnHandWeightTotal",
             "TotalShippedLb", "TotalProductionLb", "TotalUsage", "AvgWeeklyUsage",
             "WeeksOnHand", "PackCount", "DesiredFZ_Weight", "WeightToMove", "EXT_Weight"
         ]
-        mv1_export = mv1[export_cols]
         buf1 = io.BytesIO()
-        mv1_export.to_excel(buf1, index=False, sheet_name="FZ2EXT")
+        mv1[export_cols].to_excel(buf1, index=False, sheet_name="FZ2EXT")
         buf1.seek(0)
         st.download_button(
-            "Download FZ→EXT List",
-            buf1.getvalue(),
+            "Download FZ→EXT List", buf1.getvalue(),
             file_name="FZ2EXT_SelectedCols.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
@@ -130,16 +138,22 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme: 
     )
 
     back = ext[ext["SKU"].map(fz_woh).fillna(0) < thr2].copy()
-    back["FZ_Weight"] = back["SKU"].map(fz_weight).fillna(0)
+    back["FZ_Weight"] = back["SKU"].map(fz_woh).fillna(0)
     back["DesiredFZ_Weight"] = back["AvgWeeklyUsage"] * thr2
     back["WeightToReturn"] = back["DesiredFZ_Weight"].sub(back["FZ_Weight"]).clip(lower=0)
     back["TotalOnHand"] = back["OnHandWeightTotal"] + back["FZ_Weight"]
 
     # Metrics
+    total_wt_ret = back["WeightToReturn"].sum()
+    total_cost_ret = ((back["WeightToReturn"]/back["OnHandWeightTotal"]) * back["OnHandCostTotal"]).sum()
     col1, col2, col3 = st.columns(3)
     col1.metric("SKUs to Return", back["SKU"].nunique())
-    col2.metric("Total Weight to Return", f"{back['WeightToReturn'].sum():,.0f} lb")
-    col3.metric("Total Cost to Return",   f"${(back['WeightToReturn']/back['OnHandWeightTotal']*back['OnHandCostTotal']).sum():,.0f}")
+    col2.metric("Total Weight to Return", f"{total_wt_ret:,.0f} lb")
+    col3.metric("Total Cost to Return", f"${total_cost_ret:,.0f}")
+
+    sup2 = sorted(back["Supplier"].dropna().unique())
+    chosen2 = st.multiselect("Filter Suppliers", sup2, default=sup2, key="mv2_sups")
+    back = back[back["Supplier"].isin(chosen2)]
 
     # Chart
     if not back.empty:
@@ -158,7 +172,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme: 
                     alt.Tooltip("OnHandWeightTotal:Q", format=",.0f", title="EXT On-Hand Wt"),
                     alt.Tooltip("FZ_Weight:Q", format=",.0f", title="FZ On-Hand Wt"),
                     alt.Tooltip("TotalOnHand:Q", format=",.0f", title="Total On-Hand Wt"),
-                    alt.Tooltip("PackCount:Q", title="Packs Available"),
+                    alt.Tooltip("PackCount:Q", title="Case or Packs Available"),
                     alt.Tooltip("AvgWeightPerPack:Q", format=",.1f", title="Avg Wt/Pack"),
                     alt.Tooltip("DesiredFZ_Weight:Q", format=",.0f", title="Desired FZ Wt"),
                     alt.Tooltip("WeightToReturn:Q", format=",.0f", title="Weight to Return"),
@@ -171,20 +185,18 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme: 
         )
         st.altair_chart(theme(chart2), use_container_width=True)
 
-    # Download EXT→FZ List with selected columns
+    # Download EXT→FZ with selected cols
     if not back.empty:
         export_cols = [
             "SKU_Desc", "ProductState", "Supplier", "OnHandWeightTotal",
             "TotalShippedLb", "TotalProductionLb", "TotalUsage", "AvgWeeklyUsage",
             "WeeksOnHand", "PackCount", "DesiredFZ_Weight", "WeightToReturn", "FZ_Weight"
         ]
-        back_export = back[export_cols]
         buf2 = io.BytesIO()
-        back_export.to_excel(buf2, index=False, sheet_name="EXT2FZ")
+        back[export_cols].to_excel(buf2, index=False, sheet_name="EXT2FZ")
         buf2.seek(0)
         st.download_button(
-            "Download EXT→FZ List",
-            buf2.getvalue(),
+            "Download EXT→FZ List", buf2.getvalue(),
             file_name="EXT2FZ_SelectedCols.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
