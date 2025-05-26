@@ -280,6 +280,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         data=buf.getvalue(),
         file_name="Purchase_Plan.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
     # ── Distribution of WOH ─────────────────────────────────────
