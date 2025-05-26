@@ -198,115 +198,97 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+    
     # ── Advanced Purchase Recommendations ─────────────────────────────────────
     st.subheader("🛒 Advanced Purchase Recommendations")
+
+    # — Inputs —
+    col1, col2 = st.columns(2)
+    with col1:
+        service_level = st.slider("Service level (%)", 50, 99, 95, step=1) / 100
+        lead_time_wk  = st.number_input("Lead time (weeks)", 0.0, 52.0, 2.0, 0.5)
+    with col2:
+        order_cost    = st.number_input("Ordering cost ($/order)", 0.0, 1e6, 50.0, 1.0)
+        hold_rate     = st.number_input("Holding cost rate (%)", 0.0, 100.0, 25.0, 1.0) / 100
     
-    # Inputs
-    col_a, col_b = st.columns(2)
-    with col_a:
-        target_service_level = st.slider(
-            "Service level (fill rate %)", 50, 99, 95, step=1, key="svc_level"
-        ) / 100.0
-        lead_time_weeks = st.number_input(
-            "Vendor lead time (weeks)", min_value=0.0, value=2.0, step=0.5, key="lead_time"
-        )
-    with col_b:
-        ordering_cost = st.number_input(
-            "Ordering cost per order ($)", min_value=0.0, value=50.0, step=1.0, key="ord_cost"
-        )
-        holding_cost_rate = st.number_input(
-            "Annual holding cost rate (%)", min_value=0.0, value=25.0, step=1.0, key="hc_rate"
-        ) / 100.0
-    
-    # 1) Roll-up full inventory across all states (FZ + EXT)
+    # — Roll up inventory across all states —
     inv = (
         df
-        .groupby(["SKU", "SKU_Desc"], as_index=False)
+        .groupby(["SKU","SKU_Desc"], as_index=False)
         .agg({
             "OnHandWeightTotal": "sum",
             "OnHandCostTotal":   "sum",
-            "AvgWeeklyUsage":    ["mean","std"],
+            "AvgWeeklyUsage":    "mean",
             "AvgWeightPerPack":  "first"
         })
-    )
-    # flatten MultiIndex
-    inv.columns = [
-        "SKU","SKU_Desc","OnHandWeight","OnHandCost",
-        "AvgUsage","StdUsage","AvgPackWt"
-    ]
+    ).rename(columns={
+        "OnHandWeightTotal":"InvWt",
+        "OnHandCostTotal":  "InvCost",
+        "AvgWeeklyUsage":   "MeanWkUse",
+        "AvgWeightPerPack": "PackWt"
+    })
     
-    # 2) Compute demand stats
-    # weekly mean & std → daily
-    inv["DailyMean"] = inv["AvgUsage"] / 7.0
-    inv["DailyStd"]  = inv["StdUsage"]  / 7.0
+    # — Demand & safety stock —
+    inv["DailyUse"] = inv["MeanWkUse"] / 7
+    z = ss.norm.ppf(service_level)
+    inv["LT_Demand"]    = inv["DailyUse"] * (lead_time_wk * 7)
+    inv["SafetyStock"]  = z * (inv["MeanWkUse"]/7) * np.sqrt(lead_time_wk * 7)
+    inv["ReorderPoint"] = inv["LT_Demand"] + inv["SafetyStock"]
     
-    # 3) Lead-time demand & safety stock
-    z = ss.norm.ppf(target_service_level)  # Normal deviate
-    inv["LT_Demand"]      = inv["DailyMean"] * (lead_time_weeks * 7)
-    inv["SS_Weight"]      = z * inv["DailyStd"] * np.sqrt(lead_time_weeks * 7)
-    inv["ReorderPoint"]   = inv["LT_Demand"] + inv["SS_Weight"]
+    # — EOQ in pounds —
+    inv["AnnualDemand"]  = inv["MeanWkUse"] * 52
+    inv["CostPerLb"]     = inv["InvCost"] / inv["InvWt"]
+    inv["HoldingCost"]   = inv["CostPerLb"] * hold_rate
+    inv["EOQ"]           = np.sqrt(2 * inv["AnnualDemand"] * order_cost / inv["HoldingCost"])
     
-    # 4) EOQ (in weight units)
-    # D = annual demand (lb/year), Co = ordering_cost, Ch = holding_cost_rate * unit cost
-    inv["AnnualDemand"]      = inv["AvgUsage"] * 52
-    inv["UnitCostPerLb"]     = inv["OnHandCost"] / inv["OnHandWeight"]
-    inv["Ch"]                = inv["UnitCostPerLb"] * holding_cost_rate
-    inv["EOQ_Weight"]        = np.sqrt(2 * inv["AnnualDemand"] * ordering_cost / inv["Ch"])
+    # — Who needs to reorder? —
+    inv["NeedReorder"] = inv["InvWt"] <= inv["ReorderPoint"]
+    inv["OrderQtyLb"]  = np.where(inv["NeedReorder"], inv["EOQ"], 0.0)
     
-    # 5) Current position vs. ROP
-    inv["ToReorder"]  = inv["OnHandWeight"] <= inv["ReorderPoint"]
-    inv["OrderWeight"] = np.where(
-        inv["ToReorder"],
-        # pick EOQ or “up to max level” (e.g. twice ROP) – here using EOQ
-        inv["EOQ_Weight"],
-        0.0
-    )
-    
-    # 6) Convert weights → packs
-    inv["PackWtClean"] = inv["AvgPackWt"].replace(0, np.nan)
-    inv["PacksToOrder"] = np.ceil(inv["OrderWeight"] / inv["PackWtClean"].fillna(inv["OrderWeight"]))
-    inv["PacksToOrder"] = inv["PacksToOrder"].fillna(0).astype(int)
-    inv["OrderWeight"]  = inv["PacksToOrder"] * inv["PackWtClean"].fillna(inv["OrderWeight"])
-    
-    # 7) Estimate spend
-    inv["EstOrderCost"] = inv["OrderWeight"] * inv["UnitCostPerLb"]
-    
-    # 8) ABC Classification (by annual $ usage)
-    inv["AnnualSpend"] = inv["AnnualDemand"] * inv["UnitCostPerLb"]
-    inv = inv.sort_values("AnnualSpend", ascending=False)
-    cumsp = inv["AnnualSpend"].cumsum() / inv["AnnualSpend"].sum()
-    inv["ABC_Class"] = np.select(
-        [cumsp <= 0.8, cumsp <= 0.95, cumsp > 0.95],
-        ["A","B","C"], default="C"
+    # — Convert to whole packs & actual weight —
+    # if PackWt>0, packs=ceil(qty/PackWt), else 1 pack
+    pack_wt = inv["PackWt"]
+    order_wt = inv["OrderQtyLb"]
+    packs = np.where(
+        pack_wt > 0,
+        np.ceil(order_wt / pack_wt),
+        np.where(order_wt>0, 1, 0)
+    ).astype(int)
+    inv["PacksToOrder"] = packs
+    inv["OrderWtRounded"] = np.where(
+        pack_wt > 0,
+        packs * pack_wt,
+        order_wt
     )
     
-    # 9) Display & download
-    display_cols = [
-        "SKU","SKU_Desc","ABC_Class",
-        "OnHandWeight","ReorderPoint","ToReorder",
-        "EOQ_Weight","PacksToOrder","OrderWeight","EstOrderCost"
-    ]
-    disp = (
-        inv[display_cols]
-        .sort_values("ToReorder", ascending=False)
+    # — Est. spend —
+    inv["EstCost"] = inv["OrderWtRounded"] * inv["CostPerLb"]
+    
+    # — Show only columns you need —
+    output = (
+        inv[[
+          "SKU","SKU_Desc","NeedReorder","InvWt","ReorderPoint",
+          "PacksToOrder","OrderWtRounded","EstCost"
+        ]]
+        .sort_values("NeedReorder", ascending=False)
         .assign(
-            OnHandWeight=lambda d: d["OnHandWeight"].map("{:,.0f} lb".format),
-            ReorderPoint=lambda d: d["ReorderPoint"].map("{:,.0f} lb".format),
-            EOQ_Weight=lambda d: d["EOQ_Weight"].map("{:,.0f} lb".format),
-            OrderWeight=lambda d: d["OrderWeight"].map("{:,.0f} lb".format),
-            EstOrderCost=lambda d: d["EstOrderCost"].map("${:,.2f}".format)
+          InvWt=lambda d: d["InvWt"].map("{:,.0f} lb".format),
+          ReorderPoint=lambda d: d["ReorderPoint"].map("{:,.0f} lb".format),
+          OrderWtRounded=lambda d: d["OrderWtRounded"].map("{:,.0f} lb".format),
+          EstCost=lambda d: d["EstCost"].map("${:,.2f}".format)
         )
     )
-    st.dataframe(disp, use_container_width=True)
     
-    # Download full plan
+    st.dataframe(output, use_container_width=True)
+    
+    # — Downloadable order sheet —
     buf = io.BytesIO()
-    inv.to_excel(buf, index=False, sheet_name="AdvancedReorder")
+    inv.to_excel(buf, index=False, sheet_name="ReorderPlan")
     buf.seek(0)
     st.download_button(
-        "📥 Download Advanced Reorder Plan",
+        "📥 Download Reorder Plan",
         data=buf.getvalue(),
-        file_name="Advanced_Reorder_Plan.xlsx",
+        file_name="Advanced_ReorderPlan.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
