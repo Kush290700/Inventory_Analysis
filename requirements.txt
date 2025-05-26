@@ -15,3 +15,6 @@ openpyxl>=3.0.0
 # Forecasting
 prophet>=1.1.1
 cmdstanpy>=1.0.0
+
+# Scientific & Statistical
+scipy>=1.9.0
