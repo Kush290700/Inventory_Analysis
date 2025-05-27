@@ -287,7 +287,7 @@ def render(df, df_hc, cost_df, theme, sheets):
         )
 
     # ── Purchase Recommendations by Desired WOH ──────────────────────────────
-     st.subheader("🛒 Purchase Recommendations by Desired WOH")
+    st.subheader("🛒 Purchase Recommendations by Desired WOH")
 
     # a) Supplier filter
     suppliers = ["All"] + sorted(df["Supplier"].astype(str).unique())
