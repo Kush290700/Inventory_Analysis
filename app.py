@@ -102,7 +102,9 @@ with st.sidebar.expander("Upload Info", expanded=False):
 def load_everything(path: str):
     logger.info(f"Loading sheets from {path}")
     try:
-        sheets = load_sheets(path)
+        # load_sheets expects a file-like object
+        with open(path, 'rb') as f:
+            sheets = load_sheets(f)
     except Exception as e:
         raise RuntimeError(f"Error loading Excel sheets: {e}")
 
