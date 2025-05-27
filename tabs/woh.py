@@ -121,7 +121,26 @@ def compute_parent_purchase_plan(
     # --- 5) Estimate cost and filter ---
     parent_agg["CostPerLb"] = parent_agg["InvCost"] / parent_agg["InvWt"]
     parent_agg["EstCost"]   = parent_agg["OrderWt"] * parent_agg["CostPerLb"]
+    parent_agg["DesiredWt"] = parent_agg["MeanUse"] * desired_woh
 
+    # --- 6) pack counts (unchanged) ---
+    if "NumPacks" in cost_df.columns:
+        packs    = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int)
+        pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str)).to_dict()
+        parent_agg["PackCount"] = parent_agg["SKU"].map(pack_map).fillna(1).astype(int)
+    else:
+        parent_agg["PackCount"] = 1
+
+    # --- 7) compute how much to order (unchanged) ---
+    parent_agg["PackWt"]       = parent_agg["InvWt"] / parent_agg["PackCount"]
+    parent_agg["PacksToOrder"] = np.ceil(parent_agg["ToBuyWt"] / parent_agg["PackWt"]).astype(int)
+    parent_agg["OrderWt"]      = parent_agg["PacksToOrder"] * parent_agg["PackWt"]
+
+    # --- 8) estimate cost (unchanged) ---
+    parent_agg["CostPerLb"] = parent_agg["InvCost"] / parent_agg["InvWt"]
+    parent_agg["EstCost"]   = parent_agg["OrderWt"] * parent_agg["CostPerLb"]
+
+    # finally filter
     return parent_agg[parent_agg["PacksToOrder"] > 0]
     
 def render(df, df_hc, cost_df, theme, sheets):
