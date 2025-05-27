@@ -92,15 +92,16 @@ def load_everything_from_path(path: str):
     inv1_df   = process_inventory_detail1(sheets["Inventory Detail1"])
     mikuni_df = sheets.get("Mikuni", pd.DataFrame())
 
-    return df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df
+    # RETURN the sheets dict, too
+    return df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df, sheets
 
-# unpack
-df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df = load_everything_from_path(
-    st.session_state["saved_file_path"]
+# unpack 8 values now, including sheets
+df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df, sheets = (
+    load_everything_from_path(st.session_state["saved_file_path"])
 )
 
 # -----------------------------------------------------------------------------
-# 3) Merge Protein (with fall-back) + Filters + Tabs (unchanged)
+# 3) Merge Protein (with fall-back) + Filters + Tabs
 # -----------------------------------------------------------------------------
 # ensure typings
 prod_df["SKU"] = prod_df["SKU"].astype(str)
@@ -137,13 +138,19 @@ section = st.sidebar.radio(
 
 if section == "📈 KPIs":
     kpis.render(df, df_hc, apply_theme)
+
 elif section == "📊 WOH":
-    woh.render(df, df_hc, cost_df, apply_theme)
+    # pass sheets along so tab can pull "Product Detail"
+    woh.render(df, df_hc, cost_df, apply_theme, sheets)
+
 elif section == "🚀 Movers":
     movers.render(df, apply_theme)
+
 elif section == "💰 Holding Cost":
     holding_cost.render(df_hc, apply_theme)
+
 elif section == "🔎 Insights":
     insights.render(df, df_hc, apply_theme)
+
 elif section == "🗺 Bin Scan":
     bin_scan.render(inv1_df, mikuni_df, apply_theme)
