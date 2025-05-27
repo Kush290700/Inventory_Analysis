@@ -13,7 +13,6 @@ from math import ceil
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.classification import compute_threshold_move
 
-
 @st.cache_data(show_spinner=False)
 def compute_parent_purchase_plan(
     df_inv: pd.DataFrame,
@@ -28,7 +27,7 @@ def compute_parent_purchase_plan(
     4. Compute parent pack quantities and costs.
     5. Return only parent SKUs with PacksToOrder > 0.
     """
-    # --- 1) Build child->parent lookup from detail sheet ---
+    # --- 1) Build child->parent lookup and parent descriptions ---
     d = pd_detail.copy()
     d.columns = [str(c).strip() for c in d.columns]
     d = d.rename(columns={
@@ -41,10 +40,14 @@ def compute_parent_purchase_plan(
             d[col] = ""
     d["SKU"] = d["SKU"].fillna("").astype(str).str.strip()
     d["ParentSKU"] = d["ParentSKU"].fillna("").astype(str).str.strip()
+    # empty parent -> self
     mask = d["ParentSKU"].str.lower().isin(["", "nan", "none"])
     d.loc[mask, "ParentSKU"] = d.loc[mask, "SKU"]
+
+    # direct child->parent map
     child_to_parent = dict(zip(d["SKU"], d["ParentSKU"]))
-    parent_desc_map = dict(zip(d["SKU"], d.get("ParentDesc", [])))
+    # parent descriptions map
+    parent_desc_map = dict(zip(d["SKU"], d["ParentDesc"]))
 
     # --- 2) Compute DesiredWt & ToBuyWt at child level ---
     inv = df_inv.copy()
@@ -61,7 +64,7 @@ def compute_parent_purchase_plan(
     child["DesiredWt"] = child["MeanUse"] * desired_woh
     child["ToBuyWt"] = (child["DesiredWt"] - child["InvWt"]).clip(lower=0)
 
-    # --- 3) Map to parent and aggregate ---
+    # --- 3) Map to parent and aggregate child needs to parent level ---
     child["ParentSKU"] = child["SKU"].map(child_to_parent).fillna(child["SKU"])
     parent = (
         child.groupby("ParentSKU", as_index=False)
@@ -73,12 +76,10 @@ def compute_parent_purchase_plan(
              )
              .rename(columns={"ParentSKU": "SKU"})
     )
-    # description: use parent detail if available else fallback
-    parent["SKU_Desc"] = parent["SKU"].map(
-        lambda sku: parent_desc_map.get(sku) or sku
-    )
+    # assign parent descriptions
+    parent["SKU_Desc"] = parent["SKU"].map(parent_desc_map).fillna(parent["SKU"])
 
-    # --- 4) Compute pack counts and order qty for parents ---
+    # --- 4) Compute pack counts and order quantities for parents ---
     if "NumPacks" in cost_df.columns:
         packs = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int)
         pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str)).to_dict()
@@ -93,9 +94,9 @@ def compute_parent_purchase_plan(
     parent["EstCost"] = parent["OrderWt"] * parent["CostPerLb"]
     parent["DesiredWt"] = parent["MeanUse"] * desired_woh
 
-    # 5) Return only parents needing orders
+    # --- 5) Return only parent SKUs needing orders ---
     return parent[parent["PacksToOrder"] > 0]
-    
+
 def render(df, df_hc, cost_df, theme, sheets):
     st.header("📊 Weeks-On-Hand Analysis")
 
@@ -320,7 +321,7 @@ def render(df, df_hc, cost_df, theme, sheets):
         file_name="Purchase_Plan.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    
+ 
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of Weeks-On-Hand")
 
