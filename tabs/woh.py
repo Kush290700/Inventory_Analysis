@@ -14,7 +14,7 @@ from utils.classification import compute_threshold_move
 
 # Render function for Weeks-On-Hand Analysis tab
 
-def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, sheets, theme):
+def render(df, df_hc, cost_df, theme, sheets):
     st.header("📊 Weeks-On-Hand Analysis")
 
     # ── Compute PackCount & AvgWeightPerPack ───────────────────────────────
