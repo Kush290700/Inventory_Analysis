@@ -201,137 +201,123 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
-    # ── Purchase Recommendations by Desired WOH ────────────────────────────── 
-   # ── 0) Pull in Product Detail sheet ────────────────────────────────
-product_detail = sheets.get("Product Detail", pd.DataFrame())
-if not product_detail.empty:
-    # ensure proper types
-    product_detail["Product Code"]     = product_detail["Product Code"].astype(str)
-    product_detail["Velocity Parent"]  = product_detail["Velocity Parent"].astype(str)
-    # make a small lookup for descriptions
-    parent_desc = (
-        product_detail[["Product Code","Description"]]
-        .drop_duplicates()
-        .rename(columns={"Product Code":"ParentSKU","Description":"ParentDesc"})
+   # ── 1) Pull in Product Detail & build lookup ───────────────────────────
+    product_detail = sheets.get("Product Detail", pd.DataFrame())
+    if not product_detail.empty:
+        product_detail["Product Code"]    = product_detail["Product Code"].astype(str)
+        product_detail["Velocity Parent"] = product_detail["Velocity Parent"].astype(str)
+        parent_desc = (
+            product_detail[["Product Code","Description"]]
+            .drop_duplicates()
+            .rename(columns={"Product Code":"ParentSKU", "Description":"ParentDesc"})
+        )
+    else:
+        parent_desc = pd.DataFrame(columns=["ParentSKU","ParentDesc"])
+    
+    # ── 2) UI inputs ──────────────────────────────────────────────────────
+    st.subheader("🛒 Purchase Recommendations by Desired WOH")
+    supplier_opts     = ["All"] + sorted(df["Supplier"].astype(str).unique())
+    selected_supplier = st.selectbox("Supplier", supplier_opts, key="pr_supplier")
+    df_pr             = df if selected_supplier=="All" else df[df["Supplier"]==selected_supplier]
+    
+    desired_woh = st.slider(
+        "Desired Weeks-On-Hand",
+        0.0, 52.0, 4.0, 0.5,
+        help="How many weeks’ worth of stock you want on hand"
     )
-else:
-    # empty fallback
-    product_detail = pd.DataFrame(columns=["Product Code","Velocity Parent"])
-    parent_desc   = pd.DataFrame(columns=["ParentSKU","ParentDesc"])
-
-# ── 1) UI inputs ────────────────────────────────────────────────────
-st.subheader("🛒 Purchase Recommendations by Desired WOH")
-
-# Supplier filter (reuse df from above)
-supplier_opts     = ["All"] + sorted(df["Supplier"].astype(str).unique())
-selected_supplier = st.selectbox("Supplier", supplier_opts, key="pr_supplier")
-df_pr = df if selected_supplier=="All" else df[df["Supplier"]==selected_supplier]
-
-desired_woh = st.slider(
-    "Desired Weeks-On-Hand",
-    min_value=0.0, max_value=52.0, value=4.0, step=0.5,
-    help="How many weeks’ worth of stock you want on hand"
-)
-
-# ── 2) Child-level rollup ──────────────────────────────────────────
-child_inv = (
-    df_pr
-    .groupby(["SKU","SKU_Desc"], as_index=False)
-    .agg(
-        MeanUse=("AvgWeeklyUsage","mean"),
-        InvWt   =("OnHandWeightTotal","sum"),
-        InvCost =("OnHandCostTotal","sum")
+    
+    # ── 3) Child-level rollup ────────────────────────────────────────────
+    child_inv = (
+        df_pr
+        .groupby(["SKU","SKU_Desc"], as_index=False)
+        .agg(
+            MeanUse=("AvgWeeklyUsage","mean"),
+            InvWt   =("OnHandWeightTotal","sum"),
+            InvCost =("OnHandCostTotal","sum")
+        )
     )
-)
-
-# ── 3) Map children to Velocity Parent ─────────────────────────────
-if "Velocity Parent" in product_detail.columns:
-    child_inv = child_inv.merge(
-        product_detail[["Product Code","Velocity Parent"]],
-        left_on="SKU", right_on="Product Code", how="left"
+    
+    # ── 4) Map each child to its parent code ─────────────────────────────
+    if "Velocity Parent" in product_detail.columns:
+        child_inv = child_inv.merge(
+            product_detail[["Product Code","Velocity Parent"]],
+            left_on="SKU", right_on="Product Code", how="left"
+        )
+        child_inv["Velocity Parent"] = child_inv["Velocity Parent"].fillna(child_inv["SKU"])
+    else:
+        child_inv["Velocity Parent"] = child_inv["SKU"]
+    
+    # ── 5) Aggregate up to the parent SKU ────────────────────────────────
+    parent_inv = (
+        child_inv
+        .groupby("Velocity Parent", as_index=False)
+        .agg(
+            MeanUse=("MeanUse","sum"),
+            InvWt   =("InvWt","sum"),
+            InvCost =("InvCost","sum")
+        )
+        .rename(columns={"Velocity Parent":"SKU"})
     )
-    child_inv["Velocity Parent"] = (
-        child_inv["Velocity Parent"]
-        .fillna(child_inv["SKU"])  # child becomes its own parent if missing
+    
+    # ── 6) Lookup a friendly description for the parent ─────────────────
+    parent_inv = parent_inv.merge(
+        parent_desc, left_on="SKU", right_on="ParentSKU", how="left"
     )
-else:
-    child_inv["Velocity Parent"] = child_inv["SKU"]
-
-# ── 4) Aggregate up to parent SKU ─────────────────────────────────
-parent_inv = (
-    child_inv
-    .groupby("Velocity Parent", as_index=False)
-    .agg(
-        MeanUse=("MeanUse","sum"),
-        InvWt   =("InvWt","sum"),
-        InvCost =("InvCost","sum")
+    parent_inv["SKU_Desc"] = parent_inv["ParentDesc"].fillna(parent_inv["SKU"])
+    parent_inv.drop(columns=["ParentDesc","ParentSKU"], inplace=True)
+    
+    # ── 7) Map pack-count & compute order quantities + cost ──────────────
+    if "NumPacks" in cost_df.columns:
+        packs = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int)
+        pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str))
+        parent_inv["PackCount"] = (
+            parent_inv["SKU"].map(pack_map).fillna(1).astype(int)
+        )
+    else:
+        parent_inv["PackCount"] = 1
+    
+    parent_inv["PackWt"]       = parent_inv["InvWt"] / parent_inv["PackCount"]
+    parent_inv["DesiredWt"]    = parent_inv["MeanUse"] * desired_woh
+    parent_inv["ToBuyWt"]      = (parent_inv["DesiredWt"] - parent_inv["InvWt"]).clip(lower=0)
+    parent_inv["PacksToOrder"] = np.ceil(parent_inv["ToBuyWt"] / parent_inv["PackWt"]).astype(int)
+    parent_inv["OrderWt"]      = parent_inv["PacksToOrder"] * parent_inv["PackWt"]
+    parent_inv["CostPerLb"]    = parent_inv["InvCost"] / parent_inv["InvWt"]
+    parent_inv["EstCost"]      = parent_inv["OrderWt"] * parent_inv["CostPerLb"]
+    
+    # ── 8) Filter out zero-purchase rows & surface the ParentSKU column ───
+    parent_inv = parent_inv[parent_inv["PacksToOrder"] > 0]
+    parent_inv.insert(0, "ParentSKU", parent_inv["SKU"])
+    
+    # ── 9) Sort & format for display ─────────────────────────────────────
+    parent_inv = parent_inv.sort_values(["MeanUse","EstCost"], ascending=[False,True])
+    
+    display = (
+        parent_inv[[
+            "ParentSKU",
+            "SKU_Desc",
+            "InvWt","DesiredWt",
+            "PackCount","PacksToOrder","OrderWt","EstCost"
+        ]]
+        .assign(
+          InvWt=lambda df: df["InvWt"].map("{:,.0f} lb".format),
+          DesiredWt=lambda df: df["DesiredWt"].map("{:,.0f} lb".format),
+          OrderWt=lambda df: df["OrderWt"].map("{:,.0f} lb".format),
+          EstCost=lambda df: df["EstCost"].map("${:,.2f}".format)
+        )
     )
-    .rename(columns={"Velocity Parent":"SKU"})
-)
-
-# ── 5) Bring in parent description ─────────────────────────────────
-parent_inv = parent_inv.merge(
-    parent_desc, left_on="SKU", right_on="ParentSKU", how="left"
-)
-parent_inv["SKU_Desc"] = parent_inv["ParentDesc"].fillna(parent_inv["SKU"])
-parent_inv.drop(columns=["ParentSKU","ParentDesc"], inplace=True)
-
-# ── 6) Map pack-count from cost_df (parent level) ───────────────────
-if "NumPacks" in cost_df.columns:
-    packs = (
-        pd.to_numeric(cost_df["NumPacks"], errors="coerce")
-          .fillna(1)
-          .astype(int)
+    
+    st.dataframe(display, use_container_width=True)
+    
+    # ── 10) Downloadable plan (no zeros!) ────────────────────────────────
+    buf = io.BytesIO()
+    parent_inv.to_excel(buf, index=False, sheet_name="PurchasePlan")
+    buf.seek(0)
+    st.download_button(
+        "📥 Download Purchase Plan",
+        data=buf.getvalue(),
+        file_name="Purchase_Plan.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str))
-    parent_inv["PackCount"] = (
-        parent_inv["SKU"]
-        .map(pack_map)
-        .fillna(1)
-        .astype(int)
-    )
-else:
-    parent_inv["PackCount"] = 1
-
-# ── 7) Compute ordering quantities & costs ──────────────────────────
-parent_inv["PackWt"]      = parent_inv["InvWt"] / parent_inv["PackCount"]
-parent_inv["DesiredWt"]   = parent_inv["MeanUse"] * desired_woh
-parent_inv["ToBuyWt"]     = (parent_inv["DesiredWt"] - parent_inv["InvWt"]).clip(lower=0)
-parent_inv["PacksToOrder"] = np.ceil(parent_inv["ToBuyWt"] / parent_inv["PackWt"]).astype(int)
-parent_inv["OrderWt"]     = parent_inv["PacksToOrder"] * parent_inv["PackWt"]
-
-parent_inv["CostPerLb"] = parent_inv["InvCost"] / parent_inv["InvWt"]
-parent_inv["EstCost"]   = parent_inv["OrderWt"] * parent_inv["CostPerLb"]
-
-# ── 8) Sort & format for display ───────────────────────────────────
-parent_inv = parent_inv.sort_values(["MeanUse","EstCost"], ascending=[False,True])
-
-display = (
-    parent_inv[[
-        "SKU","SKU_Desc",
-        "InvWt","DesiredWt",
-        "PackCount","PacksToOrder","OrderWt","EstCost"
-    ]]
-    .assign(
-        InvWt=lambda df: df["InvWt"].map("{:,.0f} lb".format),
-        DesiredWt=lambda df: df["DesiredWt"].map("{:,.0f} lb".format),
-        OrderWt=lambda df: df["OrderWt"].map("{:,.0f} lb".format),
-        EstCost=lambda df: df["EstCost"].map("${:,.2f}".format)
-    )
-)
-
-st.dataframe(display, use_container_width=True)
-
-# ── 9) Downloadable parent-level plan ──────────────────────────────
-buf = io.BytesIO()
-parent_inv.to_excel(buf, index=False, sheet_name="PurchasePlan")
-buf.seek(0)
-st.download_button(
-    "📥 Download Purchase Plan",
-    data=buf.getvalue(),
-    file_name="Purchase_Plan.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of Weeks-On-Hand")
 
