@@ -6,7 +6,6 @@ import altair as alt
 import pandas as pd
 import numpy as np
 
-# Ensure the project root is on the path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.classification import compute_threshold_move
 
@@ -17,6 +16,7 @@ def compute_parent_purchase_plan(
     cost_df: pd.DataFrame,
     desired_woh: float
 ) -> pd.DataFrame:
+    """Return purchase plan for parent SKUs only—never double-order, always aggregate up."""
     required_cols = {
         'df_inv': ['SKU', 'AvgWeeklyUsage', 'OnHandWeightTotal', 'OnHandCostTotal', 'SKU_Desc'],
         'pd_detail': ['Product Code', 'Velocity Parent', 'Description'],
@@ -24,9 +24,9 @@ def compute_parent_purchase_plan(
     }
     for df_name, cols in required_cols.items():
         df = locals()[df_name]
-        if df_name == 'cost_df' and df.empty:
+        if df_name == 'cost_df' and (df is None or df.empty):
             continue
-        if df.empty:
+        if df is None or df.empty:
             st.error(f"{df_name} is empty")
             return pd.DataFrame()
         missing_cols = [c for c in cols if c not in df.columns]
@@ -34,7 +34,6 @@ def compute_parent_purchase_plan(
             st.error(f"Missing columns in {df_name}: {missing_cols}")
             return pd.DataFrame()
 
-    # Clean detail
     d = pd_detail.copy()
     d.columns = [str(c).strip() for c in d.columns]
     d = d.rename(columns={"Product Code": "SKU", "Velocity Parent": "ParentSKU", "Description": "ParentDesc"})
@@ -64,7 +63,7 @@ def compute_parent_purchase_plan(
     )
     parent_stats["DesiredWt"] = parent_stats["MeanUse"] * desired_woh
     parent_stats["ToBuyWt"] = (parent_stats["DesiredWt"] - parent_stats["InvWt"]).clip(lower=0)
-    if not cost_df.empty and "NumPacks" in cost_df.columns:
+    if cost_df is not None and not cost_df.empty and "NumPacks" in cost_df.columns:
         pack_map = pd.Series(
             pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int).clip(lower=1).values,
             index=cost_df["SKU"].astype(str)
@@ -99,46 +98,74 @@ def compute_parent_purchase_plan(
     return result
 
 def render(df, df_hc, cost_df, theme, sheets):
-    # ---- Minimal columns, fix missing ones ----
-    for col in ["SKU", "SKU_Desc", "ProductState", "Supplier", "Protein", "OnHandWeightTotal", "AvgWeeklyUsage", "WeeksOnHand", "PackCount", "OnHandCostTotal"]:
+    # ---- Column prepping ----
+    num_cols = [
+        "OnHandWeightTotal", "AvgWeeklyUsage", "WeeksOnHand", "PackCount", "OnHandCostTotal"
+    ]
+    obj_cols = [
+        "SKU", "SKU_Desc", "ProductState", "Supplier", "Protein"
+    ]
+    for col in obj_cols:
         if col not in df.columns:
-            df[col] = "" if col in ["SKU", "SKU_Desc", "ProductState", "Supplier", "Protein"] else 0
-    for c in ["OnHandWeightTotal", "AvgWeeklyUsage", "WeeksOnHand", "PackCount", "OnHandCostTotal"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+            df[col] = ""
+    for col in num_cols:
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     df["SKU"] = df["SKU"].astype(str).str.strip()
     df["SKU_Desc"] = df["SKU_Desc"].astype(str).str.strip()
     df["ProductState"] = df["ProductState"].astype(str).str.upper().fillna("")
 
-    # --- FZ → EXT ---
-    st.subheader("🔄 Move FZ → EXT")
+    # ---- FZ → EXT ----
+    st.subheader("🔄 Move FZ → EXT (Reduce Freezer Overstock)")
     fz = df[df["ProductState"].str.startswith("FZ") & (df["AvgWeeklyUsage"] > 0)].copy()
     ext = df[df["ProductState"].str.startswith("EXT") & (df["AvgWeeklyUsage"] > 0)].copy()
     ext_weight_lookup = ext.set_index("SKU")["OnHandWeightTotal"]
-    thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 12.0, 2.0, 0.25, key="fz2ext_thr")
-    to_move = fz[fz["WeeksOnHand"] > thr1].copy()
-    to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
-    to_move["WeightToMove"] = (to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]).clip(lower=0)
-    to_move["EXT_Weight"] = to_move["SKU"].map(ext_weight_lookup).fillna(0)
-    to_move["TotalOnHand"] = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
-    mv1 = to_move[to_move["WeightToMove"] > 0].copy()
+    thr1 = st.slider(
+        "Set target max FZ WOH (weeks):", 0.0, 12.0, 2.0, 0.25, key="fz2ext_thr",
+        help="SKUs above this weeks-on-hand threshold will have excess weight suggested for EXT movement."
+    )
+    fz["DesiredFZ_Weight"] = fz["AvgWeeklyUsage"] * thr1
+    fz["WeightToMove"] = (fz["OnHandWeightTotal"] - fz["DesiredFZ_Weight"]).clip(lower=0)
+    fz["EXT_Weight"] = fz["SKU"].map(ext_weight_lookup).fillna(0)
+    fz["TotalOnHand"] = fz["OnHandWeightTotal"] + fz["EXT_Weight"]
+    mv1 = fz[(fz["WeeksOnHand"] > thr1) & (fz["WeightToMove"] > 0)].copy()
     mv1["CostToMove"] = np.where(
         mv1["OnHandWeightTotal"] > 0,
         (mv1["WeightToMove"] / mv1["OnHandWeightTotal"]) * mv1["OnHandCostTotal"],
         0
     )
+
+    # --- FZ→EXT Bar Chart (Top 10 by WeightToMove) ---
+    if not mv1.empty:
+        mv1_top = mv1.nlargest(10, "WeightToMove")
+        chart1 = alt.Chart(mv1_top).mark_bar().encode(
+            x=alt.X("WeightToMove:Q", title="Weight to Move (lb)"),
+            y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
+            color="Supplier:N",
+            tooltip=[
+                alt.Tooltip("SKU:N"),
+                alt.Tooltip("SKU_Desc:N", title="SKU Desc"),
+                alt.Tooltip("Supplier:N"),
+                alt.Tooltip("WeightToMove:Q", format=",.0f"),
+                alt.Tooltip("CostToMove:Q", format="$.0f")
+            ]
+        ).properties(height=320, title="Top SKUs to Move FZ→EXT")
+        st.altair_chart(chart1, use_container_width=True)
+
+    # Export
     st.metric("SKUs to Move", int(mv1["SKU"].nunique()))
     st.metric("Total Weight to Move", f"{mv1['WeightToMove'].sum():,.0f} lb")
     st.metric("Total Cost to Move", f"${mv1['CostToMove'].sum():,.0f}")
     if not mv1.empty:
-        buf1 = io.BytesIO()
-        export_cols = [
+        cols_out = [
             "SKU", "SKU_Desc", "ProductState", "Supplier",
             "OnHandWeightTotal", "EXT_Weight", "TotalOnHand",
             "AvgWeeklyUsage", "WeeksOnHand", "PackCount",
             "DesiredFZ_Weight", "WeightToMove", "CostToMove"
         ]
-        export_cols = [c for c in export_cols if c in mv1.columns]
-        mv1[export_cols].to_excel(buf1, index=False, sheet_name="FZ2EXT")
+        buf1 = io.BytesIO()
+        mv1[cols_out].to_excel(buf1, index=False, sheet_name="FZ2EXT")
         buf1.seek(0)
         st.download_button(
             "⬇️ Download FZ→EXT List",
@@ -147,34 +174,52 @@ def render(df, df_hc, cost_df, theme, sheets):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-    # --- EXT → FZ ---
-    st.subheader("🔄 Move EXT → FZ")
+    # ---- EXT → FZ ----
+    st.subheader("🔄 Move EXT → FZ (Refill Freezer Understock)")
     fz_weight_lookup = fz.set_index("SKU")["OnHandWeightTotal"]
-    thr2 = st.slider("Desired FZ WOH to Achieve", 0.0, 12.0, 2.0, 0.25, key="ext2fz_thr")
-    back = ext.copy()
-    back["FZ_Weight"] = back["SKU"].map(fz_weight_lookup).fillna(0)
-    back["DesiredFZ_Weight"] = back["AvgWeeklyUsage"] * thr2
-    back["WeightToReturn"] = (back["DesiredFZ_Weight"] - back["FZ_Weight"]).clip(lower=0)
-    back["TotalOnHand"] = back["OnHandWeightTotal"] + back["FZ_Weight"]
-    mv2 = back[back["WeightToReturn"] > 0].copy()
+    thr2 = st.slider(
+        "Set min FZ WOH to achieve:", 0.0, 12.0, 2.0, 0.25, key="ext2fz_thr",
+        help="SKUs below this WOH will have weight suggested for return from EXT to FZ."
+    )
+    ext["FZ_Weight"] = ext["SKU"].map(fz_weight_lookup).fillna(0)
+    ext["DesiredFZ_Weight"] = ext["AvgWeeklyUsage"] * thr2
+    ext["WeightToReturn"] = (ext["DesiredFZ_Weight"] - ext["FZ_Weight"]).clip(lower=0)
+    ext["TotalOnHand"] = ext["OnHandWeightTotal"] + ext["FZ_Weight"]
+    mv2 = ext[(ext["FZ_Weight"] < ext["DesiredFZ_Weight"]) & (ext["WeightToReturn"] > 0)].copy()
     mv2["CostToReturn"] = np.where(
         mv2["OnHandWeightTotal"] > 0,
         (mv2["WeightToReturn"] / mv2["OnHandWeightTotal"]) * mv2["OnHandCostTotal"],
         0
     )
+    # --- EXT→FZ Bar Chart (Top 10 by WeightToReturn) ---
+    if not mv2.empty:
+        mv2_top = mv2.nlargest(10, "WeightToReturn")
+        chart2 = alt.Chart(mv2_top).mark_bar().encode(
+            x=alt.X("WeightToReturn:Q", title="Weight to Return (lb)"),
+            y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
+            color="Supplier:N",
+            tooltip=[
+                alt.Tooltip("SKU:N"),
+                alt.Tooltip("SKU_Desc:N", title="SKU Desc"),
+                alt.Tooltip("Supplier:N"),
+                alt.Tooltip("WeightToReturn:Q", format=",.0f"),
+                alt.Tooltip("CostToReturn:Q", format="$.0f")
+            ]
+        ).properties(height=320, title="Top SKUs to Return EXT→FZ")
+        st.altair_chart(chart2, use_container_width=True)
+
     st.metric("SKUs to Return", int(mv2["SKU"].nunique()))
     st.metric("Total Weight to Return", f"{mv2['WeightToReturn'].sum():,.0f} lb")
     st.metric("Total Cost to Return", f"${mv2['CostToReturn'].sum():,.0f}")
     if not mv2.empty:
-        buf2 = io.BytesIO()
-        export_cols2 = [
+        cols_out2 = [
             "SKU", "SKU_Desc", "ProductState", "Supplier",
             "OnHandWeightTotal", "FZ_Weight", "TotalOnHand",
             "AvgWeeklyUsage", "WeeksOnHand", "PackCount",
             "DesiredFZ_Weight", "WeightToReturn", "CostToReturn"
         ]
-        export_cols2 = [c for c in export_cols2 if c in mv2.columns]
-        mv2[export_cols2].to_excel(buf2, index=False, sheet_name="EXT2FZ")
+        buf2 = io.BytesIO()
+        mv2[cols_out2].to_excel(buf2, index=False, sheet_name="EXT2FZ")
         buf2.seek(0)
         st.download_button(
             "⬇️ Download EXT→FZ List",
@@ -183,19 +228,22 @@ def render(df, df_hc, cost_df, theme, sheets):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-    # --- Purchase Plan ---
+    # ---- Purchase Plan (with Pie Chart of Top Suppliers) ----
     st.subheader("🛒 Purchase Recommendations by Desired WOH (Parent SKUs Only)")
     supplier_opts = ["All"] + sorted(df["Supplier"].astype(str).unique())
-    selected_supplier = st.selectbox("Supplier", supplier_opts, key="pr_supplier")
+    selected_supplier = st.selectbox(
+        "Filter Purchase Plan by Supplier:", supplier_opts, key="pr_supplier"
+    )
     df_pr = df if selected_supplier == "All" else df[df["Supplier"] == selected_supplier]
     desired_woh = st.slider(
-        "Desired Weeks-On-Hand", 0.0, 12.0, 4.0, 0.5,
-        help="How many weeks’ worth of stock you want on hand"
+        "Desired Weeks-On-Hand for Purchase Plan", 0.0, 12.0, 4.0, 0.5,
+        help="How many weeks’ worth of stock you want on hand for parent-level purchasing"
     )
     pd_detail = sheets.get("Product Detail", pd.DataFrame())
     plan_df = compute_parent_purchase_plan(df_pr, pd_detail, cost_df, desired_woh)
     if not plan_df.empty:
-        display = (
+        # Main Table
+        plan_display = (
             plan_df[[
                 "SKU", "SKU_Desc", "InvWt", "DesiredWt",
                 "PackCount", "PacksToOrder", "OrderWt", "EstCost"
@@ -207,7 +255,7 @@ def render(df, df_hc, cost_df, theme, sheets):
                 EstCost=lambda d: d["EstCost"].map("${:,.2f}".format)
             )
         )
-        st.dataframe(display, use_container_width=True)
+        st.dataframe(plan_display, use_container_width=True)
         buf = io.BytesIO()
         plan_df.to_excel(buf, index=False, sheet_name="PurchasePlan")
         buf.seek(0)
@@ -217,5 +265,25 @@ def render(df, df_hc, cost_df, theme, sheets):
             file_name="Purchase_Plan.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
+        # --- Pie Chart by Supplier (Top 10) ---
+        # Join supplier info (get from original df, parent level)
+        parent_to_supplier = df.set_index("SKU")["Supplier"].to_dict()
+        plan_df["Supplier"] = plan_df["SKU"].map(parent_to_supplier).fillna("Unknown")
+        supplier_summary = (
+            plan_df.groupby("Supplier", as_index=False)["EstCost"].sum()
+            .sort_values("EstCost", ascending=False)
+            .head(10)
+        )
+        if not supplier_summary.empty:
+            pie = alt.Chart(supplier_summary).mark_arc(innerRadius=50).encode(
+                theta=alt.Theta(field="EstCost", type="quantitative", stack=True),
+                color=alt.Color("Supplier:N", legend=alt.Legend(title="Supplier")),
+                tooltip=[
+                    alt.Tooltip("Supplier:N"),
+                    alt.Tooltip("EstCost:Q", format="$.0f")
+                ]
+            ).properties(title="Top Suppliers in Purchase Plan (by Estimated Cost)")
+            st.altair_chart(pie, use_container_width=True)
     else:
         st.warning("No purchase plan generated due to invalid or missing data.")
