@@ -24,8 +24,7 @@ from tabs import (
     movers,
     holding_cost,
     insights,
-    bin_scan,
-)
+    bin_scan)
 
 def apply_theme(chart):
     return (
