@@ -22,37 +22,45 @@ def compute_parent_purchase_plan(
 ) -> pd.DataFrame:
     # 1) Prepare detail sheet
     d = pd_detail.copy()
-
-    # rename exactly your three columns
+    # strip whitespace from column names
+    d.columns = d.columns.str.strip()
+    # rename your three columns
     d = d.rename(columns={
         "Product Code":    "SKU",
         "Velocity Parent": "ParentSKU",
         "Description":     "ParentDesc"
     })
-    # ensure they exist
+    # ensure cols exist
     for c in ("SKU","ParentSKU","ParentDesc"):
         if c not in d.columns:
             d[c] = ""
 
-    # cast & strip
-    d["SKU"]       = d["SKU"].astype(str).str.strip()
-    d["ParentSKU"] = d["ParentSKU"].astype(str).str.strip()
-    d["ParentDesc"]= d["ParentDesc"].astype(str).str.strip()
+    # cast to str, strip values
+    d["SKU"]       = d["SKU"].fillna("").astype(str).str.strip()
+    d["ParentSKU"] = d["ParentSKU"].fillna("").astype(str).str.strip()
+    d["ParentDesc"]= d["ParentDesc"].fillna("").astype(str).str.strip()
 
-    # true parents map to themselves
-    d["ParentSKU"] = d.apply(
-        lambda row: row["SKU"] if row["ParentSKU"] in ("", "nan", "None") else row["ParentSKU"],
-        axis=1
-    )
+    # 2) Wherever ParentSKU is empty/"nan"/"None", point it back to itself
+    is_missing = d["ParentSKU"].str.lower().isin(["", "nan", "none"])
+    d.loc[is_missing, "ParentSKU"] = d.loc[is_missing, "SKU"]
 
-    # drop duplicate SKU rows
-    d = d.drop_duplicates(subset=["SKU"])
+    # 3) Build initial mapping (child → direct parent)
+    raw_map = dict(zip(d["SKU"], d["ParentSKU"]))
 
-    # build maps
-    child_to_parent = d.set_index("SKU")["ParentSKU"].to_dict()
-    parent_desc_map = d.set_index("SKU")["ParentDesc"].to_dict()
+    # 4) Flatten the chain so that if A→B and B→C, A→C
+    def find_root(sku):
+        parent = raw_map.get(sku, sku)
+        # if parent maps further and isn’t a self‐map, recurse
+        if parent != sku and raw_map.get(parent, parent) != parent:
+            return find_root(parent)
+        return parent
 
-    # 2) Child-level aggregation
+    child_to_parent = {sku: find_root(sku) for sku in raw_map}
+
+    # 5) Parent description map (from the parent row’s own Description)
+    parent_desc_map = {row["SKU"]: row["ParentDesc"] for _, row in d.iterrows()}
+
+    # -- now your original child-level aggregation --
     inv = df_inv.copy()
     inv["SKU"] = inv["SKU"].astype(str).str.strip()
     inv["SKU_Desc"] = inv["SKU_Desc"].astype(str).str.strip()
@@ -67,10 +75,10 @@ def compute_parent_purchase_plan(
         )
     )
 
-    # 3) Map each child to its parent (fallback to itself)
+    # 6) Attach ultimate parent to each child
     child_agg["ParentSKU"] = child_agg["SKU"].map(child_to_parent).fillna(child_agg["SKU"])
 
-    # 4) Aggregate up to parent
+    # 7) Roll up to the parent level
     parent_agg = (
         child_agg
         .groupby("ParentSKU", as_index=False)
@@ -82,17 +90,16 @@ def compute_parent_purchase_plan(
         .rename(columns={"ParentSKU":"SKU"})
     )
 
-    # 5) Parent description: detail first, fallback to any child SKU_Desc
-    child_desc = child_agg.drop_duplicates("SKU").set_index("SKU")["SKU_Desc"].to_dict()
+    # 8) Parent description: prefer the mapped ParentDesc, else fallback to any child_desc
+    child_desc = child_agg.set_index("SKU")["SKU_Desc"].to_dict()
     def get_desc(sku):
-        pd_desc = parent_desc_map.get(sku, "")
-        if pd_desc and pd_desc.lower() not in ("", "nan", "none"):
-            return pd_desc
+        desc = parent_desc_map.get(sku, "")
+        if desc and desc.lower() not in ("", "nan", "none"):
+            return desc
         return child_desc.get(sku, sku)
-
     parent_agg["SKU_Desc"] = parent_agg["SKU"].map(get_desc)
 
-    # 6) Pack counts from cost_df
+    # 9) Pack counts from cost_df
     if "NumPacks" in cost_df.columns:
         packs = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int)
         pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str)).to_dict()
@@ -100,7 +107,7 @@ def compute_parent_purchase_plan(
     else:
         parent_agg["PackCount"] = 1
 
-    # 7) Order quantities + cost
+    # 10) Order quantities + cost
     parent_agg["PackWt"]       = parent_agg["InvWt"] / parent_agg["PackCount"]
     parent_agg["DesiredWt"]    = parent_agg["MeanUse"] * desired_woh
     parent_agg["ToBuyWt"]      = (parent_agg["DesiredWt"] - parent_agg["InvWt"]).clip(lower=0)
@@ -109,7 +116,7 @@ def compute_parent_purchase_plan(
     parent_agg["CostPerLb"]    = parent_agg["InvCost"] / parent_agg["InvWt"]
     parent_agg["EstCost"]      = parent_agg["OrderWt"] * parent_agg["CostPerLb"]
 
-    # 8) Return only parents needing orders
+    # 11) Return only those parents that actually need ordering
     return parent_agg[parent_agg["PacksToOrder"] > 0]
     
 def render(df, df_hc, cost_df, theme, sheets):
