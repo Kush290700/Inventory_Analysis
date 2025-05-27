@@ -201,19 +201,28 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
-    # ── Purchase Recommendations by Desired WOH ──────────────────────────────
+    # ── Purchase Recommendations by Desired WOH ────────────────────────────── 
     st.subheader("🛒 Purchase Recommendations by Desired WOH")
     
-    # 1) User input: target Weeks‐On‐Hand
+    # — Supplier filter
+    # ensure Supplier exists and is string
+    df["Supplier"] = df.get("Supplier", "").astype(str)
+    supplier_opts    = ["All"] + sorted(df["Supplier"].unique())
+    selected_supplier = st.selectbox("Supplier", supplier_opts, key="pr_supplier")
+    
+    # apply supplier filter to this section’s data
+    df_pr = df if selected_supplier == "All" else df[df["Supplier"] == selected_supplier]
+    
+    # 1) User input: target Weeks-On-Hand
     desired_woh = st.slider(
         "Desired Weeks-On-Hand",
         0.0, 52.0, 4.0, 0.5,
         help="How many weeks’ worth of stock you want on hand"
     )
     
-    # 2) Roll up across all states
+    # 2) Roll up across SKU/Desc
     inv = (
-        df
+        df_pr
         .groupby(["SKU", "SKU_Desc"], as_index=False)
         .agg({
             "AvgWeeklyUsage":    "mean",
@@ -227,15 +236,19 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         })
     )
     
-    # 3) Map pack‐count from cost_df
+    # 3) Map pack-count from cost_df
     if "NumPacks" in cost_df.columns:
-        packs_series = (
+        packs = (
             pd.to_numeric(cost_df["NumPacks"], errors="coerce")
-              .fillna(1)
-              .astype(int)
+              .fillna(1).astype(int)
         )
-        pack_map = pd.Series(packs_series.values, index=cost_df["SKU"].astype(str))
-        inv["PackCount"] = inv["SKU"].astype(str).map(pack_map).fillna(1).astype(int)
+        pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str))
+        inv["PackCount"] = (
+            inv["SKU"].astype(str)
+               .map(pack_map)
+               .fillna(1)
+               .astype(int)
+        )
     else:
         inv["PackCount"] = 1
     
@@ -246,7 +259,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
     inv["DesiredWt"] = inv["MeanUse"] * desired_woh
     inv["ToBuyWt"]   = (inv["DesiredWt"] - inv["InvWt"]).clip(lower=0)
     
-    # 6) Packs to order (round up to whole packs) & actual order weight
+    # 6) Packs to order & order weight
     inv["PacksToOrder"] = np.ceil(inv["ToBuyWt"] / inv["PackWt"]).astype(int)
     inv["OrderWt"]      = inv["PacksToOrder"] * inv["PackWt"]
     
@@ -254,15 +267,15 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
     inv["CostPerLb"] = inv["InvCost"] / inv["InvWt"]
     inv["EstCost"]   = inv["OrderWt"] * inv["CostPerLb"]
     
-    # 8) Sort high‐usage first
-    inv = inv.sort_values(["MeanUse","EstCost"], ascending=[False, True])
+    # 8) Sort high-usage first
+    inv = inv.sort_values(["MeanUse", "EstCost"], ascending=[False, True])
     
     # 9) Display essentials
     display = (
         inv[[
-          "SKU","SKU_Desc",
-          "InvWt","DesiredWt",
-          "PackCount","PacksToOrder","OrderWt","EstCost"
+          "SKU", "SKU_Desc",
+          "InvWt", "DesiredWt",
+          "PackCount", "PacksToOrder", "OrderWt", "EstCost"
         ]]
         .assign(
           InvWt=lambda x: x["InvWt"].map("{:,.0f} lb".format),
@@ -283,6 +296,7 @@ def render(df: pd.DataFrame, df_hc: pd.DataFrame, cost_df: pd.DataFrame, theme):
         file_name="Purchase_Plan.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
 
     # ── Distribution of WOH ─────────────────────────────────────
