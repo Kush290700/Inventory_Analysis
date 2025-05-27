@@ -20,36 +20,23 @@ def compute_parent_purchase_plan(
     cost_df: pd.DataFrame,
     desired_woh: float
 ) -> pd.DataFrame:
-    # 1) Detect & rename detail columns
-    cols = pd_detail.columns.tolist()
-    rename_map = {}
-    for key, new in [("product code","SKU"), ("velocity parent","ParentSKU"), ("description","ParentDesc")]:
-        match = next((c for c in cols if c.lower().strip()==key), None)
-        if match:
-            rename_map[match] = new
+    # 1) Build child→parent map directly from your three exact columns
+    #    'Product Code' → child, 'Velocity Parent' → parent, 'Description' → parentDesc
+    if {"Product Code","Velocity Parent","Description"}.issubset(pd_detail.columns):
+        detail = pd_detail[["Product Code","Velocity Parent","Description"]].copy()
+        detail["Product Code"]    = detail["Product Code"].astype(str)
+        detail["Velocity Parent"] = detail["Velocity Parent"].astype(str).replace({"": pd.NA})
+        detail["Description"]     = detail["Description"].astype(str)
 
-    detail = pd_detail.rename(columns=rename_map)
+        # Map each child SKU → its parent (if blank, we'll fill next)
+        child_to_parent = detail.set_index("Product Code")["Velocity Parent"]
+        parent_desc_map = detail.set_index("Product Code")["Description"]
+    else:
+        # no detail sheet: every SKU is its own parent, no descriptions
+        child_to_parent = pd.Series(dtype="object")
+        parent_desc_map = pd.Series(dtype="object")
 
-    # 2) Guarantee we have Series for SKU, ParentSKU, ParentDesc
-    for col in ("SKU","ParentSKU","ParentDesc"):
-        if col not in detail.columns:
-            # create an empty string series of the same length
-            detail[col] = ""
-        # now every detail[col] is a Series, safe to cast
-        detail[col] = detail[col].astype(str).str.strip()
-
-    # 3) True parents map to themselves
-    detail["ParentSKU"] = detail["ParentSKU"].replace({"": pd.NA})
-    detail["ParentSKU"] = detail["ParentSKU"].fillna(detail["SKU"])
-
-    # 4) Deduplicate
-    detail = detail.drop_duplicates(subset=["SKU"])
-
-    # 5) Build mapping series
-    child_to_parent = detail.set_index("SKU")["ParentSKU"]
-    parent_desc_map = detail.set_index("SKU")["ParentDesc"]
-
-    # 6) Roll up inventory at the child level
+    # 2) Aggregate at the child level
     child_agg = (
         df_inv
         .groupby(["SKU","SKU_Desc"], as_index=False)
@@ -60,14 +47,14 @@ def compute_parent_purchase_plan(
         )
     )
 
-    # 7) Map each child to its parent
+    # 3) Map each child to its parent (fall back to self)
     child_agg["ParentSKU"] = (
         child_agg["SKU"]
         .map(child_to_parent)
         .fillna(child_agg["SKU"])
     )
 
-    # 8) Aggregate up to parent
+    # 4) Aggregate all children under each parent
     parent_agg = (
         child_agg
         .groupby("ParentSKU", as_index=False)
@@ -79,33 +66,27 @@ def compute_parent_purchase_plan(
         .rename(columns={"ParentSKU":"SKU"})
     )
 
-    # 9) Parent description: detail first, then fallback to the child SKU_Desc
+    # 5) Determine each parent’s description
+    #    Primary: detail sheet’s Description
+    #    Fallback: any child’s SKU_Desc
     inv_desc = child_agg.drop_duplicates("SKU").set_index("SKU")["SKU_Desc"]
     parent_agg["SKU_Desc"] = (
         parent_agg["SKU"]
         .map(parent_desc_map)
-        .where(lambda s: s.notna() & (s!="" ), np.nan)
+        .where(lambda s: s.notna() & (s!=""), np.nan)
         .combine_first(parent_agg["SKU"].map(inv_desc))
         .fillna(parent_agg["SKU"])
     )
 
-    # 10) Compute PackCount from cost_df
+    # 6) PackCount from cost_df
     if "NumPacks" in cost_df.columns:
-        packs = (
-            pd.to_numeric(cost_df["NumPacks"], errors="coerce")
-              .fillna(1).astype(int)
-        )
-        pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str))
-        parent_agg["PackCount"] = (
-            parent_agg["SKU"]
-            .map(pack_map)
-            .fillna(1)
-            .astype(int)
-        )
+        pp = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int)
+        pack_map = pd.Series(pp.values, index=cost_df["SKU"].astype(str))
+        parent_agg["PackCount"] = parent_agg["SKU"].map(pack_map).fillna(1).astype(int)
     else:
         parent_agg["PackCount"] = 1
 
-    # 11) Compute order quantities & costs
+    # 7) Compute order quantities & cost
     parent_agg["PackWt"]       = parent_agg["InvWt"] / parent_agg["PackCount"]
     parent_agg["DesiredWt"]    = parent_agg["MeanUse"] * desired_woh
     parent_agg["ToBuyWt"]      = (parent_agg["DesiredWt"] - parent_agg["InvWt"]).clip(lower=0)
@@ -114,7 +95,7 @@ def compute_parent_purchase_plan(
     parent_agg["CostPerLb"]    = parent_agg["InvCost"] / parent_agg["InvWt"]
     parent_agg["EstCost"]      = parent_agg["OrderWt"] * parent_agg["CostPerLb"]
 
-    # 12) Return only parents that need ordering
+    # 8) Return only parent SKUs that need ordering
     return parent_agg[parent_agg["PacksToOrder"] > 0]
     
 def render(df, df_hc, cost_df, theme, sheets):
@@ -303,26 +284,26 @@ def render(df, df_hc, cost_df, theme, sheets):
             mime="application/vnd.openxmlformats-officedocument-spreadsheetml.sheet"
         )
 
-        # ── Purchase Recommendations by Desired WOH ────────────────────────────
+    # ── Purchase Recommendations by Desired WOH ────────────────────────────
     st.subheader("🛒 Purchase Recommendations by Desired WOH")
 
-    # Supplier filter
+    # a) Supplier filter
     supplier_opts     = ["All"] + sorted(df["Supplier"].astype(str).unique())
     selected_supplier = st.selectbox("Supplier", supplier_opts, key="pr_supplier")
-    df_pr = df if selected_supplier=="All" else df[df["Supplier"]==selected_supplier]
+    df_pr = df if selected_supplier == "All" else df[df["Supplier"] == selected_supplier]
 
-    # Desired WOH slider
+    # b) Desired Weeks-On-Hand
     desired_woh = st.slider(
         "Desired Weeks-On-Hand",
         0.0, 52.0, 4.0, 0.5,
         help="How many weeks’ worth of stock you want on hand"
     )
 
-    # Compute the parent purchase plan (cached)
+    # c) Compute the plan
     pd_detail = sheets.get("Product Detail", pd.DataFrame())
     plan_df   = compute_parent_purchase_plan(df_pr, pd_detail, cost_df, desired_woh)
 
-    # Format & display
+    # d) Display
     display = (
         plan_df[[
             "SKU","SKU_Desc","InvWt","DesiredWt",
@@ -337,7 +318,7 @@ def render(df, df_hc, cost_df, theme, sheets):
     )
     st.dataframe(display, use_container_width=True)
 
-    # Download button
+    # e) Download button
     buf = io.BytesIO()
     plan_df.to_excel(buf, index=False, sheet_name="PurchasePlan")
     buf.seek(0)
@@ -345,8 +326,8 @@ def render(df, df_hc, cost_df, theme, sheets):
         "📥 Download Purchase Plan",
         data=buf.getvalue(),
         file_name="Purchase_Plan.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of Weeks-On-Hand")
