@@ -82,13 +82,13 @@ if uploaded:
 
     st.session_state.file_path = str(tmp_path)
     st.session_state.file_ts = datetime.now()
-    
 
+# Ensure a file is present
 if not st.session_state.file_path:
     st.sidebar.warning("Please upload your master .xlsx to begin.")
     st.stop()
 
-# Upload Info
+# Upload Info Panel
 with st.sidebar.expander("Upload Info", expanded=False):
     st.markdown(f"**File:** {Path(st.session_state.file_path).name}")
     st.markdown(
@@ -99,16 +99,15 @@ with st.sidebar.expander("Upload Info", expanded=False):
 # Data Loading & Caching
 # -----------------------
 @st.cache_data(show_spinner=False)
-def load_everything(path: str):
-    logger.info(f"Loading sheets from {path}")
+def load_everything(file_path: str):
+    logger.info(f"Loading sheets from {file_path}")
     try:
-        # load_sheets expects a file-like object
-        with open(path, 'rb') as f:
+        with open(file_path, 'rb') as f:
             sheets = load_sheets(f)
     except Exception as e:
         raise RuntimeError(f"Error loading Excel sheets: {e}")
 
-    # Core pipeline
+    # Main pipeline
     sales_df, inv_df, prod_df, cost_df = preprocess_data(
         sheets.get("Sales History"),
         sheets.get("Inventory Detail"),
@@ -123,50 +122,34 @@ def load_everything(path: str):
     snap = process_inventory_snapshot(sheets.get("Inventory Detail"))
     df_hc = compute_holding_cost(snap)
 
-    # Inventory Detail1 + Mikuni data
+    # Additional sheets
     inv1_df = process_inventory_detail1(sheets.get("Inventory Detail1", pd.DataFrame()))
     mikuni_df = sheets.get("Mikuni", pd.DataFrame())
 
     return df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df
 
-# Load data with spinner
+# Show loading spinner
 with st.spinner("Processing inventory data..."):
     df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df = load_everything(
         st.session_state.file_path
     )
 
 # -----------------------
-# Post-processing & Merge
+# Post-processing & Protein Merge
 # -----------------------
-# Ensure SKU types
-prod_df["SKU"] = prod_df["SKU"].astype(str)
-df_woh["SKU"] = df_woh["SKU"].astype(str)
+# Ensure SKU is string
+prod_df["SKU"] = prod_df.get("SKU", pd.Series(dtype=str)).astype(str)
+df_woh["SKU"] = df_woh.get("SKU", pd.Series(dtype=str)).astype(str)
 
-# Merge in Protein if available
-def add_protein_column(df, prod):
-    if "Protein" in prod.columns:
-        merged = df.merge(
-            prod[["SKU", "Protein"]], on="SKU", how="left"
-        )
-        merged["Protein"] = merged["Protein"].fillna("Unknown")
-        return merged
-    else:
-        logger.warning("Production data missing 'Protein' column; defaulting all to 'Unknown'")
-        df["Protein"] = "Unknown"
-        return df
-
-# apply merge function
-df_woh = add_protein_column(df_woh, prod_df)
-
-# -----------------------
-prod_df["SKU"] = prod_df["SKU"].astype(str)
-df_woh["SKU"] = df_woh["SKU"].astype(str)
-
-# Merge in Protein
-df_woh = df_woh.merge(
-    prod_df[["SKU", "Protein"]], on="SKU", how="left"
-)
-df_woh["Protein"].fillna("Unknown", inplace=True)
+# Merge Protein if present
+if "Protein" in prod_df.columns:
+    df_woh = df_woh.merge(
+        prod_df[["SKU", "Protein"]], on="SKU", how="left"
+    )
+    df_woh["Protein"] = df_woh["Protein"].fillna("Unknown")
+else:
+    logger.warning("'Protein' column missing; defaulting to 'Unknown'")
+    df_woh["Protein"] = "Unknown"
 
 # -----------------------
 # Download Processed Data
@@ -182,33 +165,26 @@ st.sidebar.download_button(
 # Filters
 # -----------------------
 prot_opts = ["All"] + sorted(df_woh["Protein"].unique())
-state_opts = ["All"] + sorted(df_woh["ProductState"].unique())
-sku_opts = ["All"] + sorted(df_woh["SKU_Desc"].unique())
+state_opts = ["All"] + sorted(df_woh.get("ProductState", pd.Series(dtype=str)).unique())
+sku_opts = ["All"] + sorted(df_woh.get("SKU_Desc", pd.Series(dtype=str)).unique())
 
 f_p = st.sidebar.selectbox("Protein", prot_opts)
 f_s = st.sidebar.selectbox("State", state_opts)
 f_k = st.sidebar.selectbox("SKU Desc", sku_opts)
 
-mask = (
+condition = (
     ((f_p == "All") | (df_woh["Protein"] == f_p))
     & ((f_s == "All") | (df_woh["ProductState"] == f_s))
     & ((f_k == "All") | (df_woh["SKU_Desc"] == f_k))
 )
-filtered = df_woh[mask]
+filtered = df_woh[condition]
 
 # -----------------------
 # Section Navigation
 # -----------------------
 section = st.sidebar.radio(
     "Select Section",
-    [
-        "📈 KPIs",
-        "📊 WOH",
-        "🚀 Movers",
-        "💰 Holding Cost",
-        "🔎 Insights",
-        "🗺 Bin Scan",
-    ],
+    ["📈 KPIs","📊 WOH","🚀 Movers","💰 Holding Cost","🔎 Insights","🗺 Bin Scan"],
 )
 
 # -----------------------
@@ -220,7 +196,7 @@ def apply_theme(chart):
     )
 
 # -----------------------
-# Render Sections
+# Render Selected Section
 # -----------------------
 if section == "📈 KPIs":
     kpis.render(filtered, df_hc, apply_theme)
