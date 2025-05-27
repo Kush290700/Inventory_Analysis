@@ -13,7 +13,8 @@ def load_sheets(raw_file) -> dict[str, pd.DataFrame]:
         "Inventory Detail",
         "Production Batch",
         "Inventory Detail1",
-        "Mikuni"
+        "Mikuni",
+        "Product Detail"
     ]
 
     try:
