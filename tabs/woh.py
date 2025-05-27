@@ -213,17 +213,26 @@ def render(df, df_hc, cost_df, theme, sheets):
         help="How many weeks’ worth of stock you want on hand"
     )
     
-    # 2) Pull in Product Detail sheet for parent mapping
+    # 2) Build child→parent & description lookups from Product Detail
     pd_detail = sheets.get("Product Detail", pd.DataFrame())
     if not pd_detail.empty:
-        pd_detail["Product Code"]    = pd_detail["Product Code"].astype(str)
-        pd_detail["Velocity Parent"] = pd_detail["Velocity Parent"].astype(str)
-        # index by child SKU
-        parent_map = pd_detail.set_index("Product Code")[["Velocity Parent","Description"]]
+        pd_detail["Product Code"]     = pd_detail["Product Code"].astype(str)
+        # Normalize empty strings to NaN
+        pd_detail["Velocity Parent"]  = (
+            pd_detail["Velocity Parent"]
+            .astype(str)
+            .replace({"": pd.NA})
+        )
+        # map child SKU → parent SKU
+        child_to_parent = pd_detail.set_index("Product Code")["Velocity Parent"]
+        # map any SKU → its description
+        description_map = pd_detail.set_index("Product Code")["Description"]
     else:
-        parent_map = pd.DataFrame(columns=["Velocity Parent","Description"])
+        # fallbacks if sheet missing
+        child_to_parent = pd.Series(dtype="string")
+        description_map = pd.Series(dtype="string")
     
-    # 3) Child-level rollup
+    # 3) Child-level rollup (same as before)
     child_inv = (
         df_pr
         .groupby(["SKU","SKU_Desc"], as_index=False)
@@ -234,19 +243,17 @@ def render(df, df_hc, cost_df, theme, sheets):
         )
     )
     
-    # 4) Map each child to its parent SKU
+    # 4) Assign true parent SKU (or itself if no parent)
     child_inv["ParentSKU"] = (
         child_inv["SKU"]
-        .map(parent_map["Velocity Parent"])
-        .where(lambda s: s.notna() & (s != ""), child_inv["SKU"])
+        .map(child_to_parent)
+        .fillna(child_inv["SKU"])
     )
-    # pull in parent description
-    child_inv["ParentDesc"] = child_inv["ParentSKU"].map(parent_map["Description"])
     
     # 5) Aggregate up to parent
     parent_inv = (
         child_inv
-        .groupby(["ParentSKU","ParentDesc"], as_index=False)
+        .groupby("ParentSKU", as_index=False)
         .agg(
             MeanUse=("MeanUse","sum"),
             InvWt   =("InvWt","sum"),
@@ -255,15 +262,29 @@ def render(df, df_hc, cost_df, theme, sheets):
     )
     
     # rename for consistency
-    parent_inv.rename(columns={"ParentSKU":"SKU","ParentDesc":"SKU_Desc"}, inplace=True)
-    # fallback description = SKU code
-    parent_inv["SKU_Desc"] = parent_inv["SKU_Desc"].fillna(parent_inv["SKU"])
+    parent_inv.rename(columns={"ParentSKU":"SKU"}, inplace=True)
     
-    # 6) Map pack-count from cost_df & compute order quantities
+    # 6) Pull in parent description (fallback to code)
+    parent_inv["SKU_Desc"] = (
+        parent_inv["SKU"]
+        .map(description_map)
+        .fillna(parent_inv["SKU"])
+    )
+    
+    # 7) Map pack-count & compute order quantities + cost
     if "NumPacks" in cost_df.columns:
-        packs = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int)
+        packs = (
+            pd.to_numeric(cost_df["NumPacks"], errors="coerce")
+              .fillna(1)
+              .astype(int)
+        )
         pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str))
-        parent_inv["PackCount"] = parent_inv["SKU"].map(pack_map).fillna(1).astype(int)
+        parent_inv["PackCount"] = (
+            parent_inv["SKU"]
+            .map(pack_map)
+            .fillna(1)
+            .astype(int)
+        )
     else:
         parent_inv["PackCount"] = 1
     
@@ -275,16 +296,17 @@ def render(df, df_hc, cost_df, theme, sheets):
     parent_inv["CostPerLb"]    = parent_inv["InvCost"] / parent_inv["InvWt"]
     parent_inv["EstCost"]      = parent_inv["OrderWt"] * parent_inv["CostPerLb"]
     
-    # 7) Drop zero-order rows
+    # 8) Drop zero-purchase rows
     parent_inv = parent_inv[parent_inv["PacksToOrder"] > 0]
     
-    # 8) Sort & display
+    # 9) Sort & format for display
     parent_inv = parent_inv.sort_values(["MeanUse","EstCost"], ascending=[False,True])
+    
     display = (
         parent_inv[[
-            "SKU", "SKU_Desc",
-            "InvWt", "DesiredWt",
-            "PackCount", "PacksToOrder", "OrderWt", "EstCost"
+            "SKU","SKU_Desc",
+            "InvWt","DesiredWt",
+            "PackCount","PacksToOrder","OrderWt","EstCost"
         ]]
         .assign(
             InvWt=lambda df: df["InvWt"].map("{:,.0f} lb".format),
@@ -293,9 +315,10 @@ def render(df, df_hc, cost_df, theme, sheets):
             EstCost=lambda df: df["EstCost"].map("${:,.2f}".format)
         )
     )
+    
     st.dataframe(display, use_container_width=True)
     
-    # 9) Downloadable parent-level plan
+    # 10) Downloadable parent-level plan
     buf = io.BytesIO()
     parent_inv.to_excel(buf, index=False, sheet_name="PurchasePlan")
     buf.seek(0)
