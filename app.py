@@ -138,6 +138,27 @@ with st.spinner("Processing inventory data..."):
 # -----------------------
 # Post-processing & Merge
 # -----------------------
+# Ensure SKU types
+prod_df["SKU"] = prod_df["SKU"].astype(str)
+df_woh["SKU"] = df_woh["SKU"].astype(str)
+
+# Merge in Protein if available
+def add_protein_column(df, prod):
+    if "Protein" in prod.columns:
+        merged = df.merge(
+            prod[["SKU", "Protein"]], on="SKU", how="left"
+        )
+        merged["Protein"] = merged["Protein"].fillna("Unknown")
+        return merged
+    else:
+        logger.warning("Production data missing 'Protein' column; defaulting all to 'Unknown'")
+        df["Protein"] = "Unknown"
+        return df
+
+# apply merge function
+df_woh = add_protein_column(df_woh, prod_df)
+
+# -----------------------
 prod_df["SKU"] = prod_df["SKU"].astype(str)
 df_woh["SKU"] = df_woh["SKU"].astype(str)
 
