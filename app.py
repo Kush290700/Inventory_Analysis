@@ -82,7 +82,7 @@ if uploaded:
 
     st.session_state.file_path = str(tmp_path)
     st.session_state.file_ts = datetime.now()
-    st.experimental_rerun()
+    
 
 if not st.session_state.file_path:
     st.sidebar.warning("Please upload your master .xlsx to begin.")
