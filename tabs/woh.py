@@ -105,7 +105,8 @@ def render(df, df_hc, cost_df, theme, sheets):
             .resolve_scale(y="independent")
             .interactive()
         )
-        st.altair_chart(theme(chart1), use_container_width=True)
+            st.altair_chart(theme(chart1), use_container_width=True)
+    
 
     # Download FZ→EXT with selected cols
     if not mv1.empty:
