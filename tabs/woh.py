@@ -8,17 +8,15 @@ from prophet import Prophet
 from math import ceil
 import scipy.stats as ss
 from typing import Callable
+
 # ensure the project root is on the path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.classification import compute_threshold_move
-
-# Render function for Weeks-On-Hand Analysis tab
 
 def render(df, df_hc, cost_df, theme, sheets):
     st.header("📊 Weeks-On-Hand Analysis")
 
     # ── Compute PackCount & AvgWeightPerPack ───────────────────────────────
-    # Map NumPacks from cost_df by SKU
     if "NumPacks" in cost_df.columns:
         packs_series = (
             pd.to_numeric(cost_df["NumPacks"], errors="coerce")
@@ -30,7 +28,6 @@ def render(df, df_hc, cost_df, theme, sheets):
     else:
         packs = pd.Series(np.nan, index=df.index)
 
-    # fallback to ItemCount if available, else to 1
     if "ItemCount" in df.columns:
         item_counts = pd.to_numeric(df["ItemCount"], errors="coerce").fillna(1).astype(int)
     else:
@@ -60,8 +57,7 @@ def render(df, df_hc, cost_df, theme, sheets):
     to_move["EXT_Weight"] = to_move["SKU"].map(ext_weight_lookup).fillna(0)
     to_move["TotalOnHand"] = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
 
-    mv_pos = to_move["WeightToMove"] > 0
-    mv1 = to_move[mv_pos]
+    mv1 = to_move[to_move["WeightToMove"] > 0]
 
     # Display metrics
     total_wt_move = mv1["WeightToMove"].sum()
@@ -105,8 +101,7 @@ def render(df, df_hc, cost_df, theme, sheets):
             .resolve_scale(y="independent")
             .interactive()
         )
-            st.altair_chart(theme(chart1), use_container_width=True)
-    
+        st.altair_chart(theme(chart1), use_container_width=True)
 
     # Download FZ→EXT with selected cols
     if not mv1.empty:
@@ -119,7 +114,8 @@ def render(df, df_hc, cost_df, theme, sheets):
         mv1[export_cols].to_excel(buf1, index=False, sheet_name="FZ2EXT")
         buf1.seek(0)
         st.download_button(
-            "Download FZ→EXT List", buf1.getvalue(),
+            "Download FZ→EXT List",
+            buf1.getvalue(),
             file_name="FZ2EXT_SelectedCols.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
@@ -146,7 +142,7 @@ def render(df, df_hc, cost_df, theme, sheets):
 
     # Metrics
     total_wt_ret = back["WeightToReturn"].sum()
-    total_cost_ret = ((back["WeightToReturn"]/back["OnHandWeightTotal"]) * back["OnHandCostTotal"]).sum()
+    total_cost_ret = ((back["WeightToReturn"] / back["OnHandWeightTotal"]) * back["OnHandCostTotal"]).sum()
     col1, col2, col3 = st.columns(3)
     col1.metric("SKUs to Return", back["SKU"].nunique())
     col2.metric("Total Weight to Return", f"{total_wt_ret:,.0f} lb")
@@ -177,8 +173,7 @@ def render(df, df_hc, cost_df, theme, sheets):
                     alt.Tooltip("AvgWeightPerPack:Q", format=",.1f", title="Avg Wt/Pack"),
                     alt.Tooltip("DesiredFZ_Weight:Q", format=",.0f", title="Desired FZ Wt"),
                     alt.Tooltip("WeightToReturn:Q", format=",.0f", title="Weight to Return"),
-                ]
-            )
+                ]            )
             .add_selection(sel3)
             .properties(width=800, height=alt.Step(25))
             .resolve_scale(y="independent")
@@ -197,12 +192,13 @@ def render(df, df_hc, cost_df, theme, sheets):
         back[export_cols].to_excel(buf2, index=False, sheet_name="EXT2FZ")
         buf2.seek(0)
         st.download_button(
-            "Download EXT→FZ List", buf2.getvalue(),
+            "Download EXT→FZ List",
+            buf2.getvalue(),
             file_name="EXT2FZ_SelectedCols.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument-spreadsheetml.sheet"
         )
-        
-   # ── 1) Pull in Product Detail & build lookup ───────────────────────────
+
+    # ── 1) Pull in Product Detail & build lookup ───────────────────────────
     product_detail = sheets.get("Product Detail", pd.DataFrame())
     if not product_detail.empty:
         product_detail["Product Code"]    = product_detail["Product Code"].astype(str)
@@ -214,19 +210,19 @@ def render(df, df_hc, cost_df, theme, sheets):
         )
     else:
         parent_desc = pd.DataFrame(columns=["ParentSKU","ParentDesc"])
-    
+
     # ── 2) UI inputs ──────────────────────────────────────────────────────
     st.subheader("🛒 Purchase Recommendations by Desired WOH")
     supplier_opts     = ["All"] + sorted(df["Supplier"].astype(str).unique())
     selected_supplier = st.selectbox("Supplier", supplier_opts, key="pr_supplier")
-    df_pr             = df if selected_supplier=="All" else df[df["Supplier"]==selected_supplier]
-    
+    df_pr             = df if selected_supplier == "All" else df[df["Supplier"] == selected_supplier]
+
     desired_woh = st.slider(
         "Desired Weeks-On-Hand",
         0.0, 52.0, 4.0, 0.5,
         help="How many weeks’ worth of stock you want on hand"
     )
-    
+
     # ── 3) Child-level rollup ────────────────────────────────────────────
     child_inv = (
         df_pr
@@ -237,7 +233,7 @@ def render(df, df_hc, cost_df, theme, sheets):
             InvCost =("OnHandCostTotal","sum")
         )
     )
-    
+
     # ── 4) Map each child to its parent code ─────────────────────────────
     if "Velocity Parent" in product_detail.columns:
         child_inv = child_inv.merge(
@@ -247,7 +243,7 @@ def render(df, df_hc, cost_df, theme, sheets):
         child_inv["Velocity Parent"] = child_inv["Velocity Parent"].fillna(child_inv["SKU"])
     else:
         child_inv["Velocity Parent"] = child_inv["SKU"]
-    
+
     # ── 5) Aggregate up to the parent SKU ────────────────────────────────
     parent_inv = (
         child_inv
@@ -259,14 +255,14 @@ def render(df, df_hc, cost_df, theme, sheets):
         )
         .rename(columns={"Velocity Parent":"SKU"})
     )
-    
+
     # ── 6) Lookup a friendly description for the parent ─────────────────
     parent_inv = parent_inv.merge(
         parent_desc, left_on="SKU", right_on="ParentSKU", how="left"
     )
     parent_inv["SKU_Desc"] = parent_inv["ParentDesc"].fillna(parent_inv["SKU"])
     parent_inv.drop(columns=["ParentDesc","ParentSKU"], inplace=True)
-    
+
     # ── 7) Map pack-count & compute order quantities + cost ──────────────
     if "NumPacks" in cost_df.columns:
         packs = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int)
@@ -276,7 +272,7 @@ def render(df, df_hc, cost_df, theme, sheets):
         )
     else:
         parent_inv["PackCount"] = 1
-    
+
     parent_inv["PackWt"]       = parent_inv["InvWt"] / parent_inv["PackCount"]
     parent_inv["DesiredWt"]    = parent_inv["MeanUse"] * desired_woh
     parent_inv["ToBuyWt"]      = (parent_inv["DesiredWt"] - parent_inv["InvWt"]).clip(lower=0)
@@ -284,31 +280,30 @@ def render(df, df_hc, cost_df, theme, sheets):
     parent_inv["OrderWt"]      = parent_inv["PacksToOrder"] * parent_inv["PackWt"]
     parent_inv["CostPerLb"]    = parent_inv["InvCost"] / parent_inv["InvWt"]
     parent_inv["EstCost"]      = parent_inv["OrderWt"] * parent_inv["CostPerLb"]
-    
+
     # ── 8) Filter out zero-purchase rows & surface the ParentSKU column ───
     parent_inv = parent_inv[parent_inv["PacksToOrder"] > 0]
     parent_inv.insert(0, "ParentSKU", parent_inv["SKU"])
-    
+
     # ── 9) Sort & format for display ─────────────────────────────────────
     parent_inv = parent_inv.sort_values(["MeanUse","EstCost"], ascending=[False,True])
-    
+
     display = (
         parent_inv[[
-            "ParentSKU",
-            "SKU_Desc",
+            "ParentSKU", "SKU_Desc",
             "InvWt","DesiredWt",
             "PackCount","PacksToOrder","OrderWt","EstCost"
         ]]
         .assign(
-          InvWt=lambda df: df["InvWt"].map("{:,.0f} lb".format),
-          DesiredWt=lambda df: df["DesiredWt"].map("{:,.0f} lb".format),
-          OrderWt=lambda df: df["OrderWt"].map("{:,.0f} lb".format),
-          EstCost=lambda df: df["EstCost"].map("${:,.2f}".format)
+            InvWt=lambda df: df["InvWt"].map("{:,.0f} lb".format),
+            DesiredWt=lambda df: df["DesiredWt"].map("{:,.0f} lb".format),
+            OrderWt=lambda df: df["OrderWt"].map("{:,.0f} lb".format),
+            EstCost=lambda df: df["EstCost"].map("${:,.2f}".format)
         )
     )
-    
+
     st.dataframe(display, use_container_width=True)
-    
+
     # ── 10) Downloadable plan (no zeros!) ────────────────────────────────
     buf = io.BytesIO()
     parent_inv.to_excel(buf, index=False, sheet_name="PurchasePlan")
@@ -319,6 +314,7 @@ def render(df, df_hc, cost_df, theme, sheets):
         file_name="Purchase_Plan.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of Weeks-On-Hand")
 
@@ -345,7 +341,6 @@ def render(df, df_hc, cost_df, theme, sheets):
 
     # 3) Histogram + density + CDF overlay
     filtered = df[df["WeeksOnHand"] <= float(df["WeeksOnHand"].quantile(0.99))]
-
     bins = st.slider(
         "Number of bins",
         10, 100, 40, step=5,
@@ -355,12 +350,10 @@ def render(df, df_hc, cost_df, theme, sheets):
     base = alt.Chart(filtered).encode(
         x=alt.X("WeeksOnHand:Q", title="Weeks-On-Hand")
     )
-
     hist = base.mark_bar(opacity=0.6).encode(
         y=alt.Y("count():Q", title="SKU Count"),
         tooltip=[alt.Tooltip("count():Q", title="Count")]
     )
-
     density = base.transform_density(
         "WeeksOnHand",
         as_=["WeeksOnHand","density"],
@@ -370,8 +363,6 @@ def render(df, df_hc, cost_df, theme, sheets):
     ).mark_line(color="orange", size=2).encode(
         y=alt.Y("density:Q", title="Density")
     )
-
-    # cumulative distribution
     cdf = (
         base.transform_window(
             cumulative="count()",
@@ -385,22 +376,17 @@ def render(df, df_hc, cost_df, theme, sheets):
         )
         .mark_line(color="green", strokeDash=[4,2])
         .encode(
-            y=alt.Y("cum_pct:Q", title="Cumulative %", axis=alt.Axis(format="%")),
+            y=alt.Y("cum_pct:Q", title="Cumulative %", axis=alt.Axis(format="%"))
         )
     )
-
-    # combine
     chart = alt.layer(hist, density, cdf).resolve_scale(
         y="independent"
     ).properties(height=350)
-
     st.altair_chart(theme(chart).interactive(), use_container_width=True)
 
-
-    # ── Annual Turns Distribution ───────────────────────────────
+    # ── Annual Turns Distribution ───────────────────────────────────────
     st.subheader("Annual Turns Distribution")
 
-    # Summary percentiles
     at25, at50, at75 = (
         df["AnnualTurns"].quantile(q) for q in (0.25, 0.50, 0.75)
     )
@@ -414,33 +400,24 @@ def render(df, df_hc, cost_df, theme, sheets):
         10, 100, 30, step=5,
         key="turn_bins"
     )
-
     hist2 = alt.Chart(df).mark_bar(opacity=0.6).encode(
         x=alt.X("AnnualTurns:Q", bin=alt.Bin(maxbins=turn_bins), title="Annual Turns"),
         y=alt.Y("count():Q", title="SKU Count"),
         tooltip=[alt.Tooltip("count():Q", title="Count")]
     )
-
-    # add median & mean lines
     mean_at   = float(df["AnnualTurns"].mean())
     median_at = float(at50)
     line_mean   = alt.Chart(pd.DataFrame({"v":[mean_at]})).mark_rule(color="red").encode(x="v:Q")
     line_median = alt.Chart(pd.DataFrame({"v":[median_at]})).mark_rule(color="blue", strokeDash=[4,4]).encode(x="v:Q")
-
-    st.altair_chart(theme(alt.layer(hist2, line_mean, line_median).properties(height=350)).interactive(),
-                     use_container_width=True)
+    combo = alt.layer(hist2, line_mean, line_median).properties(height=350)
+    st.altair_chart(theme(combo).interactive(), use_container_width=True)
     st.markdown("**Red** = mean • **Blue (dashed)** = median")
 
-
-    # ── Avg WOH by State ───────────────────────────────────────
+    # ── Avg WOH by State ───────────────────────────────────────────────
     st.subheader("Average WOH by State")
-
     avg_state = (
         df.groupby("ProductState", as_index=False)
-          .agg(
-             AvgWOH=("WeeksOnHand","mean"),
-             Count = ("SKU","nunique")
-          )
+          .agg(AvgWOH=("WeeksOnHand","mean"), Count=("SKU","nunique"))
           .sort_values("AvgWOH")
     )
     state_min = st.slider(
@@ -452,40 +429,27 @@ def render(df, df_hc, cost_df, theme, sheets):
         key="state_min"
     )
     filtered_state = avg_state[avg_state["AvgWOH"] >= state_min]
-
     bars = alt.Chart(filtered_state).mark_bar().encode(
         y=alt.Y("ProductState:N", sort=filtered_state["ProductState"].tolist(), title="State"),
         x=alt.X("AvgWOH:Q", title="Avg Weeks-On-Hand"),
         tooltip=["ProductState","AvgWOH","Count"]
     )
-
-    labels = bars.mark_text(
-        align="left",
-        baseline="middle",
-        dx=5
-    ).encode(text="Count:Q")
-
+    labels = bars.mark_text(align="left", baseline="middle", dx=5).encode(text="Count:Q")
     st.altair_chart(theme((bars + labels).properties(width=700, height=alt.Step(25))).interactive(),
                      use_container_width=True)
 
-
-    # ── WOH Distribution by Protein ───────────────────────────
+    # ── WOH Distribution by Protein ─────────────────────────────────────
     st.subheader("WOH Distribution by Protein")
-
-    # overall counts
     total_skus = df.shape[0]
-    total_prots= df["Protein"].nunique()
+    total_prots = df["Protein"].nunique()
     st.markdown(f"**{total_skus:,}** SKUs across **{total_prots}** Proteins")
-
     order_p = (
         df.groupby("Protein")["WeeksOnHand"]
           .median()
           .sort_values(ascending=False)
           .index.tolist()
     )
-
     sel = alt.selection_point(fields=["Protein"], bind="legend")
-
     box = alt.Chart(df).mark_boxplot(extent="min-max").encode(
         x="WeeksOnHand:Q",
         y=alt.Y("Protein:N", sort=order_p),
@@ -493,21 +457,18 @@ def render(df, df_hc, cost_df, theme, sheets):
         opacity=alt.condition(sel, alt.value(1), alt.value(0.2)),
         tooltip=[
             alt.Tooltip("Protein:N", title="Protein"),
-            alt.Tooltip("count():Q",   title="SKUs", aggregate="count"),
+            alt.Tooltip("count():Q", title="SKUs", aggregate="count"),
             alt.Tooltip("median(WeeksOnHand):Q", title="Median WOH")
         ]
     ).add_selection(sel)
-
-    jitter = alt.Chart(df).transform_calculate(
-        y_jitter="(random() - 0.5) * 0.6"
-    ).mark_circle(size=18).encode(
-        x="WeeksOnHand:Q",
-        y=alt.Y("Protein:N", sort=order_p),
-        yOffset="y_jitter:Q",
-        color="Protein:N",
-        opacity=alt.condition(sel, alt.value(0.6), alt.value(0.1)),
-        tooltip=["SKU_Desc","Protein","WeeksOnHand"]
-    )
-
+    jitter = alt.Chart(df).transform_calculate(y_jitter="(random() - 0.5) * 0.6")\
+        .mark_circle(size=18).encode(
+            x="WeeksOnHand:Q",
+            y=alt.Y("Protein:N", sort=order_p),
+            yOffset="y_jitter:Q",
+            color="Protein:N",
+            opacity=alt.condition(sel, alt.value(0.6), alt.value(0.1)),
+            tooltip=["SKU_Desc","Protein","WeeksOnHand"]
+        )
     st.altair_chart(theme((box + jitter).properties(width=800, height=400)).interactive(),
                      use_container_width=True)
