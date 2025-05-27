@@ -20,78 +20,93 @@ def compute_parent_purchase_plan(
     cost_df: pd.DataFrame,
     desired_woh: float
 ) -> pd.DataFrame:
-    # 1) Prepare detail sheet
-    d = pd_detail.copy()
-    # safe strip of column names
-    d.columns = [str(c).strip() for c in d.columns]
+    """
+    1. Calculate how much weight to buy for each SKU:
+         DesiredWt  = AvgWeeklyUsage × desired_woh
+         ToBuyWt    = max(DesiredWt − OnHandWeightTotal, 0)
 
-    # rename your mapping columns
+    2. Map each SKU to its Velocity Parent:
+         – Read pd_detail["Product Code"] → SKU  
+         – If pd_detail["Velocity Parent"] is non-blank, that code is the parent; otherwise SKU is its own parent.
+
+    3. Aggregate child ToBuyWt into parent buckets:
+         Group by parent SKU and sum all child ToBuyWt
+
+    4. Convert weight into pack counts:
+         PackWt      = InvWt / NumPacks  
+         PacksToOrder= ceil(TotalToBuyWt / PackWt)
+
+    5. Estimate cost:
+         EstCost     = OrderWt × (InvCost / InvWt)
+
+    Returns only parent rows with PacksToOrder > 0.
+    """
+    # --- 1) Prep detail sheet and build child→parent lookup ---
+    d = pd_detail.copy()
+    d.columns = [str(c).strip() for c in d.columns]
     d = d.rename(columns={
         "Product Code":    "SKU",
         "Velocity Parent": "ParentSKU",
         "Description":     "ParentDesc"
     })
-    # ensure the three exist
     for c in ("SKU","ParentSKU","ParentDesc"):
         if c not in d.columns:
             d[c] = ""
-
     # normalize values
-    d["SKU"]        = d["SKU"].fillna("").astype(str).str.strip()
-    d["ParentSKU"]  = d["ParentSKU"].fillna("").astype(str).str.strip()
-    d["ParentDesc"] = d["ParentDesc"].fillna("").astype(str).str.strip()
-
-    # wherever ParentSKU is blank/"nan"/"none", map it back to itself
+    d["SKU"]       = d["SKU"].fillna("").astype(str).str.strip()
+    d["ParentSKU"] = d["ParentSKU"].fillna("").astype(str).str.strip()
+    # blank/nan → self
     mask = d["ParentSKU"].str.lower().isin(["", "nan", "none"])
     d.loc[mask, "ParentSKU"] = d.loc[mask, "SKU"]
 
-    # build a _direct_ child→parent lookup dict
-    child_to_parent = dict(zip(d["SKU"], d["ParentSKU"]))
-    # also capture parent descriptions
-    parent_desc_map = dict(zip(d["SKU"], d["ParentDesc"]))
+    # direct mapping and description map
+    child_to_parent  = dict(zip(d["SKU"], d["ParentSKU"]))
+    parent_desc_map  = dict(zip(d["SKU"], d["ParentDesc"]))
 
-    # 2) child‐level aggregation
+    # --- 2) Compute per-SKU ToBuyWt ---
     inv = df_inv.copy()
     inv["SKU"]      = inv["SKU"].astype(str).str.strip()
     inv["SKU_Desc"] = inv["SKU_Desc"].astype(str).str.strip()
 
     child_agg = (
         inv
+        .assign(
+            DesiredWt = inv["AvgWeeklyUsage"] * desired_woh,
+            ToBuyWt   = (inv["AvgWeeklyUsage"] * desired_woh - inv["OnHandWeightTotal"]
+                         ).clip(lower=0)
+        )
         .groupby(["SKU","SKU_Desc"], as_index=False)
         .agg(
             MeanUse = ("AvgWeeklyUsage","mean"),
             InvWt   = ("OnHandWeightTotal","sum"),
-            InvCost = ("OnHandCostTotal","sum")
+            InvCost = ("OnHandCostTotal","sum"),
+            ToBuyWt = ("ToBuyWt","sum")
         )
     )
 
-    # 3) apply the direct mapping, default to self
-    child_agg["ParentSKU"] = child_agg["SKU"].apply(
-        lambda sku: child_to_parent.get(sku, sku)
-    )
+    # --- 3) Attach parent and roll up ToBuyWt ---
+    child_agg["ParentSKU"] = child_agg["SKU"].map(child_to_parent).fillna(child_agg["SKU"])
 
-    # 4) roll up into parent level
     parent_agg = (
         child_agg
         .groupby("ParentSKU", as_index=False)
         .agg(
             MeanUse = ("MeanUse","sum"),
             InvWt   = ("InvWt","sum"),
-            InvCost = ("InvCost","sum")
+            InvCost = ("InvCost","sum"),
+            ToBuyWt = ("ToBuyWt","sum")
         )
         .rename(columns={"ParentSKU":"SKU"})
     )
 
-    # 5) description: prefer mapped ParentDesc, else use any child_agg desc
+    # parent description
     child_desc = child_agg.set_index("SKU")["SKU_Desc"].to_dict()
     def get_desc(sku):
-        pd = parent_desc_map.get(sku, "")
-        if pd and pd.lower() not in ("", "nan", "none"):
-            return pd
-        return child_desc.get(sku, sku)
+        pd_ = parent_desc_map.get(sku, "")
+        return pd_ if pd_.lower() not in ("", "nan", "none") else child_desc.get(sku, sku)
     parent_agg["SKU_Desc"] = parent_agg["SKU"].map(get_desc)
 
-    # 6) pack counts
+    # --- 4) Pack counts & PacksToOrder ---
     if "NumPacks" in cost_df.columns:
         packs    = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int)
         pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str)).to_dict()
@@ -99,16 +114,14 @@ def compute_parent_purchase_plan(
     else:
         parent_agg["PackCount"] = 1
 
-    # 7) compute how much to order
     parent_agg["PackWt"]       = parent_agg["InvWt"] / parent_agg["PackCount"]
-    parent_agg["DesiredWt"]    = parent_agg["MeanUse"] * desired_woh
-    parent_agg["ToBuyWt"]      = (parent_agg["DesiredWt"] - parent_agg["InvWt"]).clip(lower=0)
     parent_agg["PacksToOrder"] = np.ceil(parent_agg["ToBuyWt"] / parent_agg["PackWt"]).astype(int)
     parent_agg["OrderWt"]      = parent_agg["PacksToOrder"] * parent_agg["PackWt"]
-    parent_agg["CostPerLb"]    = parent_agg["InvCost"] / parent_agg["InvWt"]
-    parent_agg["EstCost"]      = parent_agg["OrderWt"] * parent_agg["CostPerLb"]
 
-    # 8) only keep parents with >0 packs to order
+    # --- 5) Estimate cost and filter ---
+    parent_agg["CostPerLb"] = parent_agg["InvCost"] / parent_agg["InvWt"]
+    parent_agg["EstCost"]   = parent_agg["OrderWt"] * parent_agg["CostPerLb"]
+
     return parent_agg[parent_agg["PacksToOrder"] > 0]
     
 def render(df, df_hc, cost_df, theme, sheets):
