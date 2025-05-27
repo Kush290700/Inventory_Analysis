@@ -18,13 +18,7 @@ from utils.aggregation    import (
     aggregate_final_data,
 )
 from utils.costing        import compute_holding_cost
-from tabs import (
-    kpis,
-    woh,
-    movers,
-    holding_cost,
-    insights,
-    bin_scan)
+from tabs import kpis, woh, movers, holding_cost, insights, bin_scan
 
 def apply_theme(chart):
     return (
