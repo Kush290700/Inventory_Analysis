@@ -17,7 +17,13 @@ def compute_parent_purchase_plan(
     cost_df: pd.DataFrame,
     desired_woh: float
 ) -> pd.DataFrame:
-    # --- Input validation as before ---
+    """
+    Enhanced parent-level purchase logic:
+    - Only orders at parent if total (parent + children) inventory is insufficient
+    - Never double-orders for both parent and child
+    - Shows only true parent codes needing orders
+    """
+    # --- Input validation ---
     required_cols = {
         'df_inv': ['SKU', 'AvgWeeklyUsage', 'OnHandWeightTotal', 'OnHandCostTotal', 'SKU_Desc'],
         'pd_detail': ['Product Code', 'Velocity Parent', 'Description'],
@@ -35,14 +41,10 @@ def compute_parent_purchase_plan(
             st.error(f"Missing columns in {df_name}: {missing_cols}")
             return pd.DataFrame()
 
-    # --- Clean and prepare detail sheet ---
+    # --- Prepare detail sheet ---
     d = pd_detail.copy()
     d.columns = [str(c).strip() for c in d.columns]
-    d = d.rename(columns={
-        "Product Code": "SKU",
-        "Velocity Parent": "ParentSKU",
-        "Description": "ParentDesc"
-    })
+    d = d.rename(columns={"Product Code": "SKU", "Velocity Parent": "ParentSKU", "Description": "ParentDesc"})
     for col in ["SKU", "ParentSKU", "ParentDesc"]:
         if col not in d.columns:
             d[col] = ""
@@ -51,138 +53,126 @@ def compute_parent_purchase_plan(
     mask = (d["ParentSKU"].str.lower().isin(["", "nan", "none", "null"])) | (d["ParentSKU"].isna())
     d.loc[mask, "ParentSKU"] = d.loc[mask, "SKU"]
 
-    # --- Build child->parent and parent description maps ---
+    # --- Map ---
     child_to_parent = dict(zip(d["SKU"], d["ParentSKU"]))
     parent_desc_map = dict(zip(d["ParentSKU"], d["ParentDesc"]))
 
-    # --- Map each SKU to its parent ---
+    # --- Map SKUs to parent, aggregate all stats ---
     inv = df_inv.copy()
     inv["SKU"] = inv["SKU"].astype(str).str.strip()
     inv["SKU_Desc"] = inv["SKU_Desc"].astype(str).str.strip()
     inv["ParentSKU"] = inv["SKU"].map(child_to_parent).fillna(inv["SKU"])
 
-    # --- Aggregate all stats to parent SKU level ---
-    parent_df = (
+    # Group by parent (includes all children)
+    parent_stats = (
         inv.groupby("ParentSKU", as_index=False)
-           .agg(
-               MeanUse=("AvgWeeklyUsage", "sum"),
-               InvWt=("OnHandWeightTotal", "sum"),
-               InvCost=("OnHandCostTotal", "sum")
-           )
+            .agg(
+                MeanUse=("AvgWeeklyUsage", "sum"),
+                InvWt=("OnHandWeightTotal", "sum"),
+                InvCost=("OnHandCostTotal", "sum")
+            )
     )
+    parent_stats["DesiredWt"] = parent_stats["MeanUse"] * desired_woh
+    parent_stats["ToBuyWt"] = (parent_stats["DesiredWt"] - parent_stats["InvWt"]).clip(lower=0)
 
-    parent_df["DesiredWt"] = parent_df["MeanUse"] * desired_woh
-    parent_df["ToBuyWt"] = (parent_df["DesiredWt"] - parent_df["InvWt"]).clip(lower=0)
-
-    # --- Assign pack count (average across children if available, or 1) ---
+    # Assign pack count using parent code, fallback to 1
     if not cost_df.empty and "NumPacks" in cost_df.columns:
         pack_map = pd.Series(
             pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int).clip(lower=1).values,
             index=cost_df["SKU"].astype(str)
         ).to_dict()
-        parent_df["PackCount"] = parent_df["ParentSKU"].map(pack_map).fillna(1).astype(int)
+        parent_stats["PackCount"] = parent_stats["ParentSKU"].map(pack_map).fillna(1).astype(int)
     else:
-        parent_df["PackCount"] = 1
+        parent_stats["PackCount"] = 1
 
-    # --- Order weight logic: ---
-    parent_df["PackWt"] = np.where(
-        (parent_df["InvWt"] > 0) & (parent_df["PackCount"] > 0),
-        parent_df["InvWt"] / parent_df["PackCount"],
+    # Order logic
+    parent_stats["PackWt"] = np.where(
+        (parent_stats["InvWt"] > 0) & (parent_stats["PackCount"] > 0),
+        parent_stats["InvWt"] / parent_stats["PackCount"],
         0
     )
-    parent_df["PacksToOrder"] = np.where(
-        parent_df["PackWt"] > 0,
-        np.ceil(parent_df["ToBuyWt"] / parent_df["PackWt"]),
+    parent_stats["PacksToOrder"] = np.where(
+        parent_stats["PackWt"] > 0,
+        np.ceil(parent_stats["ToBuyWt"] / parent_stats["PackWt"]),
         0
     ).astype(int)
-    parent_df["OrderWt"] = parent_df["PacksToOrder"] * parent_df["PackWt"]
+    parent_stats["OrderWt"] = parent_stats["PacksToOrder"] * parent_stats["PackWt"]
 
-    # --- Add descriptions ---
-    parent_df["SKU"] = parent_df["ParentSKU"]
-    parent_df["SKU_Desc"] = parent_df["SKU"].map(parent_desc_map).fillna(parent_df["SKU"])
-
-    # --- Cost metrics ---
-    parent_df["CostPerLb"] = np.where(
-        parent_df["InvWt"] > 0,
-        parent_df["InvCost"] / parent_df["InvWt"],
+    parent_stats["SKU"] = parent_stats["ParentSKU"]
+    parent_stats["SKU_Desc"] = parent_stats["SKU"].map(parent_desc_map).fillna(parent_stats["SKU"])
+    parent_stats["CostPerLb"] = np.where(
+        parent_stats["InvWt"] > 0,
+        parent_stats["InvCost"] / parent_stats["InvWt"],
         0
     )
-    parent_df["EstCost"] = parent_df["OrderWt"] * parent_df["CostPerLb"]
+    parent_stats["EstCost"] = parent_stats["OrderWt"] * parent_stats["CostPerLb"]
 
-    # --- Only return parents that actually need to be ordered ---
-    # (If total parent+children inv is enough, ToBuyWt=0)
-    plan = parent_df[parent_df["PacksToOrder"] > 0][
+    # Only return parent codes that *truly* need purchase
+    result = parent_stats[parent_stats["PacksToOrder"] > 0][
         ["SKU", "SKU_Desc", "InvWt", "DesiredWt", "PackCount", "PacksToOrder", "OrderWt", "EstCost"]
     ].copy()
+    result.reset_index(drop=True, inplace=True)
+    return result
 
-    # Reset index for clean display/export
-    plan.reset_index(drop=True, inplace=True)
-    return plan
+def render_fz_ext_purchasing(df, df_hc, cost_df, theme, sheets):
+    st.header("📦 Advanced FZ↔EXT Analysis & Purchase Plan")
 
-def render(df, df_hc, cost_df, theme, sheets):
-    core_cols = [
-        "SKU", "WeeksOnHand", "AvgWeeklyUsage", "OnHandWeightTotal",
-        "OnHandCostTotal", "SKU_Desc", "ProductState", "Supplier"
-    ]
-    if df.empty:
-        st.warning("No inventory data available.")
-        return
-    missing_core = [c for c in core_cols if c not in df.columns]
-    if missing_core:
-        st.error(f"Missing core columns in inventory data: {missing_core}")
-        return
+    # --- Prep ---
     df = df.copy()
-    st.header("📊 Weeks-On-Hand Analysis")
-    if not cost_df.empty and "NumPacks" in cost_df.columns and "SKU" in cost_df.columns:
-        packs_series = (
-            pd.to_numeric(cost_df["NumPacks"], errors="coerce")
-              .fillna(1)
-              .astype(int)
-              .clip(lower=1)
-        )
-        pack_map = pd.Series(packs_series.values, index=cost_df["SKU"].astype(str))
-        packs = df["SKU"].astype(str).map(pack_map)
-    else:
-        packs = pd.Series(1, index=df.index)
-    if "ItemCount" in df.columns:
-        item_counts = pd.to_numeric(df["ItemCount"], errors="coerce").fillna(1).astype(int).clip(lower=1)
-    else:
-        item_counts = pd.Series(1, index=df.index)
-    df["PackCount"] = packs.fillna(item_counts).astype(int)
-    df["AvgWeightPerPack"] = np.where(
-        df["PackCount"] > 0,
-        df["OnHandWeightTotal"] / df["PackCount"],
-        df["OnHandWeightTotal"]
-    )
-    # FZ & EXT logic
-    state = df["ProductState"].fillna("").str.upper()
-    fz = df[(state.str.startswith("FZ")) & (df["AvgWeeklyUsage"] > 0)].copy()
-    ext = df[(state.str.startswith("EXT")) & (df["AvgWeeklyUsage"] > 0)].copy()
-    fz_woh = fz.set_index("SKU")["WeeksOnHand"]
+    base_cols = [
+        "SKU", "SKU_Desc", "ProductState", "Supplier",
+        "OnHandWeightTotal", "AvgWeeklyUsage", "WeeksOnHand",
+        "TotalShippedLb", "TotalProductionLb", "TotalUsage",
+        "PackCount", "OnHandCostTotal", "Protein"
+    ]
+    for col in base_cols:
+        if col not in df.columns:
+            if col in ("SKU", "SKU_Desc", "ProductState", "Supplier", "Protein"):
+                df[col] = ""
+            else:
+                df[col] = 0
+    for c in ["OnHandWeightTotal", "AvgWeeklyUsage", "WeeksOnHand", "PackCount", "OnHandCostTotal"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    df["SKU"] = df["SKU"].astype(str).str.strip()
+    df["SKU_Desc"] = df["SKU_Desc"].astype(str).str.strip()
+    df["ProductState"] = df["ProductState"].astype(str).str.upper().fillna("")
+
+    # Filters
+    suppliers = sorted(df["Supplier"].dropna().unique())
+    proteins = sorted(df["Protein"].dropna().unique())
+    colf1, colf2 = st.columns(2)
+    sel_supplier = colf1.multiselect("Filter Suppliers", suppliers, default=suppliers)
+    sel_protein = colf2.multiselect("Filter Proteins", proteins, default=proteins)
+    filtered = df[df["Supplier"].isin(sel_supplier) & df["Protein"].isin(sel_protein)].copy()
+
+    # States
+    states = sorted(set([x for x in filtered["ProductState"].unique() if x]))
+    fz_states = [x for x in states if x.startswith("FZ")]
+    ext_states = [x for x in states if x.startswith("EXT")]
+    fz = filtered[filtered["ProductState"].isin(fz_states) & (filtered["AvgWeeklyUsage"] > 0)].copy()
+    ext = filtered[filtered["ProductState"].isin(ext_states) & (filtered["AvgWeeklyUsage"] > 0)].copy()
     ext_weight_lookup = ext.set_index("SKU")["OnHandWeightTotal"]
+    fz_weight_lookup = fz.set_index("SKU")["OnHandWeightTotal"]
 
     # FZ→EXT
     st.subheader("🔄 Move FZ → EXT")
-    thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 4.0, 1.5, 0.25, key="w2e_thr")
+    thr1 = st.slider("Desired FZ Weeks-On-Hand", 0.0, 12.0, 2.0, 0.25, key="fz2ext_thr")
     to_move = fz[fz["WeeksOnHand"] > thr1].copy()
     to_move["DesiredFZ_Weight"] = to_move["AvgWeeklyUsage"] * thr1
     to_move["WeightToMove"] = (to_move["OnHandWeightTotal"] - to_move["DesiredFZ_Weight"]).clip(lower=0)
     to_move["EXT_Weight"] = to_move["SKU"].map(ext_weight_lookup).fillna(0)
     to_move["TotalOnHand"] = to_move["OnHandWeightTotal"] + to_move["EXT_Weight"]
-    mv1 = to_move[to_move["WeightToMove"] > 0]
-    total_wt_move = mv1["WeightToMove"].sum()
-    total_cost_move = np.where(
+    mv1 = to_move[to_move["WeightToMove"] > 0].copy()
+    mv1["OnHandCostTotal"] = pd.to_numeric(mv1.get("OnHandCostTotal", 0), errors="coerce").fillna(0)
+    mv1["CostToMove"] = np.where(
         mv1["OnHandWeightTotal"] > 0,
         (mv1["WeightToMove"] / mv1["OnHandWeightTotal"]) * mv1["OnHandCostTotal"],
         0
-    ).sum()
+    )
     c1, c2, c3 = st.columns(3)
-    c1.metric("SKUs to Move", mv1["SKU"].nunique())
-    c2.metric("Total Weight to Move", f"{total_wt_move:,.0f} lb")
-    c3.metric("Total Cost to Move", f"${total_cost_move:,.0f}")
-    suppliers = sorted(mv1["Supplier"].dropna().unique())
-    sel_sup = st.multiselect("Filter Suppliers", suppliers, default=suppliers, key="mv1_sups")
-    mv1 = mv1[mv1["Supplier"].isin(sel_sup)]
+    c1.metric("SKUs to Move", int(mv1["SKU"].nunique()))
+    c2.metric("Total Weight to Move", f"{mv1['WeightToMove'].sum():,.0f} lb")
+    c3.metric("Total Cost to Move", f"${mv1['CostToMove'].sum():,.0f}")
     if not mv1.empty:
         sel2 = alt.selection_multi(fields=["Supplier"], bind="legend")
         chart1 = (
@@ -196,32 +186,33 @@ def render(df, df_hc, cost_df, theme, sheets):
                 tooltip=[
                     alt.Tooltip("SKU_Desc:N", title="SKU"),
                     alt.Tooltip("Supplier:N", title="Supplier"),
+                    alt.Tooltip("Protein:N", title="Protein"),
                     alt.Tooltip("WeeksOnHand:Q", title="Current FZ WOH", format=".1f"),
                     alt.Tooltip("OnHandWeightTotal:Q", format=",.0f", title="FZ On-Hand Wt"),
                     alt.Tooltip("EXT_Weight:Q", format=",.0f", title="EXT On-Hand Wt"),
                     alt.Tooltip("TotalOnHand:Q", format=",.0f", title="Total On-Hand Wt"),
-                    alt.Tooltip("PackCount:Q", title="Case or Packs Available"),
-                    alt.Tooltip("AvgWeightPerPack:Q", format=",.1f", title="Avg Wt/Pack"),
                     alt.Tooltip("DesiredFZ_Weight:Q", format=",.0f", title="Desired FZ Wt"),
                     alt.Tooltip("WeightToMove:Q", format=",.0f", title="Weight to Move"),
+                    alt.Tooltip("CostToMove:Q", format="$.0f", title="Move Cost"),
                 ]
             )
             .add_selection(sel2)
             .properties(height=alt.Step(25))
         )
         st.altair_chart(theme(chart1).interactive(), use_container_width=True)
-    if not mv1.empty:
         export_cols = [
-            "SKU_Desc", "ProductState", "Supplier", "OnHandWeightTotal",
-            "TotalShippedLb", "TotalProductionLb", "TotalUsage", "AvgWeeklyUsage",
-            "WeeksOnHand", "PackCount", "DesiredFZ_Weight", "WeightToMove", "EXT_Weight"
+            "SKU", "SKU_Desc", "Protein", "ProductState", "Supplier",
+            "OnHandWeightTotal", "EXT_Weight", "TotalOnHand",
+            "AvgWeeklyUsage", "WeeksOnHand", "PackCount",
+            "DesiredFZ_Weight", "WeightToMove", "CostToMove",
+            "TotalShippedLb", "TotalProductionLb", "TotalUsage"
         ]
         export_cols = [c for c in export_cols if c in mv1.columns]
         buf1 = io.BytesIO()
         mv1[export_cols].to_excel(buf1, index=False, sheet_name="FZ2EXT")
         buf1.seek(0)
         st.download_button(
-            "Download FZ→EXT List",
+            "⬇️ Download FZ→EXT List",
             buf1.getvalue(),
             file_name="FZ2EXT_list.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -229,39 +220,27 @@ def render(df, df_hc, cost_df, theme, sheets):
 
     # EXT→FZ
     st.subheader("🔄 Move EXT → FZ")
-    thr2_default = 1.0
-    try:
-        if not df_hc.empty:
-            thr2_default = float(compute_threshold_move(ext, df_hc))
-    except Exception as e:
-        st.warning(f"Error computing threshold for EXT → FZ: {str(e)}")
-    thr2 = st.slider(
-        "Desired FZ WOH to achieve",
-        0.0, float(fz_woh.max()) if not fz_woh.empty else 52.0, thr2_default, step=0.25,
-        key="e2f_thr"
-    )
-    back = ext[ext["SKU"].map(fz_woh).fillna(0) < thr2].copy()
-    back["FZ_Weight"] = back["SKU"].map(fz_woh).fillna(0)
+    thr2 = st.slider("Desired FZ Weeks-On-Hand to Achieve", 0.0, 12.0, 2.0, 0.25, key="ext2fz_thr")
+    back = ext.copy()
+    back["FZ_Weight"] = back["SKU"].map(fz_weight_lookup).fillna(0)
     back["DesiredFZ_Weight"] = back["AvgWeeklyUsage"] * thr2
-    back["WeightToReturn"] = back["DesiredFZ_Weight"].sub(back["FZ_Weight"]).clip(lower=0)
+    back["WeightToReturn"] = (back["DesiredFZ_Weight"] - back["FZ_Weight"]).clip(lower=0)
     back["TotalOnHand"] = back["OnHandWeightTotal"] + back["FZ_Weight"]
-    total_wt_ret = back["WeightToReturn"].sum()
-    total_cost_ret = np.where(
-        back["OnHandWeightTotal"] > 0,
-        (back["WeightToReturn"] / back["OnHandWeightTotal"]) * back["OnHandCostTotal"],
+    mv2 = back[back["WeightToReturn"] > 0].copy()
+    mv2["OnHandCostTotal"] = pd.to_numeric(mv2.get("OnHandCostTotal", 0), errors="coerce").fillna(0)
+    mv2["CostToReturn"] = np.where(
+        mv2["OnHandWeightTotal"] > 0,
+        (mv2["WeightToReturn"] / mv2["OnHandWeightTotal"]) * mv2["OnHandCostTotal"],
         0
-    ).sum()
-    col1, col2, col3 = st.columns(3)
-    col1.metric("SKUs to Return", back["SKU"].nunique())
-    col2.metric("Total Weight to Return", f"{total_wt_ret:,.0f} lb")
-    col3.metric("Total Cost to Return", f"${total_cost_ret:,.0f}")
-    sup2 = sorted(back["Supplier"].dropna().unique())
-    chosen2 = st.multiselect("Filter Suppliers", sup2, default=sup2, key="mv2_sups")
-    back = back[back["Supplier"].isin(chosen2)]
-    if not back.empty:
+    )
+    c4, c5, c6 = st.columns(3)
+    c4.metric("SKUs to Return", int(mv2["SKU"].nunique()))
+    c5.metric("Total Weight to Return", f"{mv2['WeightToReturn'].sum():,.0f} lb")
+    c6.metric("Total Cost to Return", f"${mv2['CostToReturn'].sum():,.0f}")
+    if not mv2.empty:
         sel3 = alt.selection_multi(fields=["Supplier"], bind="legend")
         chart2 = (
-            alt.Chart(back)
+            alt.Chart(mv2)
             .mark_bar()
             .encode(
                 y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
@@ -271,32 +250,33 @@ def render(df, df_hc, cost_df, theme, sheets):
                 tooltip=[
                     alt.Tooltip("SKU_Desc:N", title="SKU"),
                     alt.Tooltip("Supplier:N", title="Supplier"),
-                    alt.Tooltip("WeeksOnHand:Q", title="Current WOH", format=".1f"),
+                    alt.Tooltip("Protein:N", title="Protein"),
+                    alt.Tooltip("WeeksOnHand:Q", title="Current EXT WOH", format=".1f"),
                     alt.Tooltip("OnHandWeightTotal:Q", format=",.0f", title="EXT On-Hand Wt"),
                     alt.Tooltip("FZ_Weight:Q", format=",.0f", title="FZ On-Hand Wt"),
                     alt.Tooltip("TotalOnHand:Q", format=",.0f", title="Total On-Hand Wt"),
-                    alt.Tooltip("PackCount:Q", title="Case or Packs Available"),
-                    alt.Tooltip("AvgWeightPerPack:Q", format=",.1f", title="Avg Wt/Pack"),
                     alt.Tooltip("DesiredFZ_Weight:Q", format=",.0f", title="Desired FZ Wt"),
                     alt.Tooltip("WeightToReturn:Q", format=",.0f", title="Weight to Return"),
+                    alt.Tooltip("CostToReturn:Q", format="$.0f", title="Return Cost"),
                 ]
             )
             .add_selection(sel3)
             .properties(height=alt.Step(25))
         )
         st.altair_chart(theme(chart2).interactive(), use_container_width=True)
-    if not back.empty:
-        export_cols = [
-            "SKU_Desc", "ProductState", "Supplier", "OnHandWeightTotal",
-            "TotalShippedLb", "TotalProductionLb", "TotalUsage", "AvgWeeklyUsage",
-            "WeeksOnHand", "PackCount", "DesiredFZ_Weight", "WeightToReturn", "FZ_Weight"
+        export_cols2 = [
+            "SKU", "SKU_Desc", "Protein", "ProductState", "Supplier",
+            "OnHandWeightTotal", "FZ_Weight", "TotalOnHand",
+            "AvgWeeklyUsage", "WeeksOnHand", "PackCount",
+            "DesiredFZ_Weight", "WeightToReturn", "CostToReturn",
+            "TotalShippedLb", "TotalProductionLb", "TotalUsage"
         ]
-        export_cols = [c for c in export_cols if c in back.columns]
+        export_cols2 = [c for c in export_cols2 if c in mv2.columns]
         buf2 = io.BytesIO()
-        back[export_cols].to_excel(buf2, index=False, sheet_name="EXT2FZ")
+        mv2[export_cols2].to_excel(buf2, index=False, sheet_name="EXT2FZ")
         buf2.seek(0)
         st.download_button(
-            "Download EXT→FZ List",
+            "⬇️ Download EXT→FZ List",
             buf2.getvalue(),
             file_name="EXT2FZ_list.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -313,7 +293,6 @@ def render(df, df_hc, cost_df, theme, sheets):
     )
     pd_detail = sheets.get("Product Detail", pd.DataFrame())
     plan_df = compute_parent_purchase_plan(df_pr, pd_detail, cost_df, desired_woh)
-    # Display parent-level plan
     if not plan_df.empty:
         display = (
             plan_df[[
@@ -340,173 +319,4 @@ def render(df, df_hc, cost_df, theme, sheets):
     else:
         st.warning("No purchase plan generated due to invalid or missing data.")
 
-    # --- Distribution of WOH ---
-    st.subheader("Distribution of Weeks-On-Hand")
-    if df["WeeksOnHand"].isna().all() or df["WeeksOnHand"].empty:
-        st.warning("Cannot compute Weeks-On-Hand metrics: all values are missing.")
-    else:
-        p25, p50, p75, p90 = (
-            df["WeeksOnHand"].quantile(q) for q in (0.25, 0.50, 0.75, 0.90)
-        )
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("25th percentile", f"{p25:.1f} weeks")
-        m2.metric("Median (50th)",   f"{p50:.1f} weeks")
-        m3.metric("75th percentile", f"{p75:.1f} weeks")
-        m4.metric("90th percentile", f"{p90:.1f} weeks")
-        thresh = st.slider(
-            "Highlight SKUs with WOH ≤ …",
-            float(df["WeeksOnHand"].min()) if not df["WeeksOnHand"].empty else 0.0,
-            float(df["WeeksOnHand"].max()) if not df["WeeksOnHand"].empty else 52.0,
-            float(p50) if not df["WeeksOnHand"].empty else 4.0,
-            key="woh_threshold"
-        )
-        below_count = int((df["WeeksOnHand"] <= thresh).sum())
-        st.markdown(f"**{below_count:,}** SKUs have WOH ≤ {thresh:.1f} weeks")
-        q99 = df["WeeksOnHand"].quantile(0.99)
-        if pd.isna(q99) or df["WeeksOnHand"].empty:
-            st.warning("Cannot draw histogram: all WeeksOnHand values are missing.")
-        else:
-            filtered = df[df["WeeksOnHand"] <= q99]
-            bins = st.slider(
-                "Number of bins",
-                10, 100, 40, step=5,
-                key="woh_hist_bins"
-            )
-            base = alt.Chart(filtered).encode(
-                x=alt.X("WeeksOnHand:Q", title="Weeks-On-Hand")
-            )
-            hist = base.mark_bar(opacity=0.6).encode(
-                y=alt.Y("count():Q", title="SKU Count"),
-                tooltip=[alt.Tooltip("count():Q", title="Count", format=",.0f")]
-            )
-            density = base.transform_density(
-                "WeeksOnHand",
-                as_=["WeeksOnHand", "density"],
-                extent=[0, float(filtered["WeeksOnHand"].max())] if not filtered.empty else [0, 52.0],
-                counts=True,
-                steps=bins
-            ).mark_line(color="orange", size=2).encode(
-                y=alt.Y("density:Q", title="Density")
-            )
-            cdf = (
-                base.transform_window(
-                    cumulative="count()",
-                    sort=[{"field": "WeeksOnHand"}]
-                )
-                .transform_joinaggregate(
-                    total="count()"
-                )
-                .transform_calculate(
-                    cum_pct="datum.cumulative / datum.total"
-                )
-                .mark_line(color="green", strokeDash=[4, 2])
-                .encode(
-                    y=alt.Y("cum_pct:Q", title="Cumulative %", axis=alt.Axis(format="%"))
-                )
-            )
-            chart = alt.layer(hist, density, cdf).resolve_scale(
-                y="independent"
-            ).properties(height=350)
-            st.altair_chart(theme(chart).interactive(), use_container_width=True)
-
-    # --- Annual Turns Distribution ---
-    if "AnnualTurns" in df.columns and not df["AnnualTurns"].isna().all():
-        st.subheader("Annual Turns Distribution")
-        at25, at50, at75 = (
-            df["AnnualTurns"].quantile(q) for q in (0.25, 0.50, 0.75)
-        )
-        a1, a2, a3 = st.columns(3)
-        a1.metric("25th percentile", f"{at25:.1f}")
-        a2.metric("Median (50th)",   f"{at50:.1f}")
-        a3.metric("75th percentile", f"{at75:.1f}")
-        turn_bins = st.slider(
-            "Number of bins (Annual Turns)",
-            10, 100, 30, step=5,
-            key="turn_bins"
-        )
-        hist2 = alt.Chart(df).mark_bar(opacity=0.6).encode(
-            x=alt.X("AnnualTurns:Q", bin=alt.Bin(maxbins=turn_bins), title="Annual Turns"),
-            y=alt.Y("count():Q", title="SKU Count"),
-            tooltip=[alt.Tooltip("count():Q", title="Count", format=",.0f")]
-        )
-        mean_at = float(df["AnnualTurns"].mean())
-        median_at = float(at50)
-        line_mean = alt.Chart(pd.DataFrame({"v": [mean_at]})).mark_rule(color="red").encode(x="v:Q")
-        line_median = alt.Chart(pd.DataFrame({"v": [median_at]})).mark_rule(color="blue", strokeDash=[4, 4]).encode(x="v:Q")
-        combo = alt.layer(hist2, line_mean, line_median).properties(height=350)
-        st.altair_chart(theme(combo).interactive(), use_container_width=True)
-        st.markdown("**Red** = mean • **Blue (dashed)** = median")
-    else:
-        st.warning("Cannot display Annual Turns Distribution: AnnualTurns column missing or all values are NaN.")
-
-    # --- Avg WOH by State ---
-    st.subheader("Average WOH by State")
-    avg_state = (
-        df.groupby("ProductState", as_index=False)
-        .agg(AvgWOH=("WeeksOnHand", "mean"), Count=("SKU", "nunique"))
-        .sort_values("AvgWOH")
-    )
-    state_min = st.slider(
-        "Hide states with Avg WOH below",
-        float(avg_state["AvgWOH"].min()) if not avg_state.empty else 0.0,
-        float(avg_state["AvgWOH"].max()) if not avg_state.empty else 52.0,
-        float(avg_state["AvgWOH"].min()) if not avg_state.empty else 0.0,
-        step=0.5,
-        key="state_min"
-    )
-    filtered_state = avg_state[avg_state["AvgWOH"] >= state_min]
-    bars = alt.Chart(filtered_state).mark_bar().encode(
-        y=alt.Y("ProductState:N", sort=filtered_state["ProductState"].tolist(), title="State"),
-        x=alt.X("AvgWOH:Q", title="Avg Weeks-On-Hand"),
-        tooltip=[
-            alt.Tooltip("ProductState:N", title="State"),
-            alt.Tooltip("AvgWOH:Q", title="Avg WOH", format=".1f"),
-            alt.Tooltip("Count:Q", title="SKU Count", format=",.0f")
-        ]
-    )
-    labels = bars.mark_text(align="left", baseline="middle", dx=5).encode(text=alt.Text("Count:Q", format=",.0f"))
-    st.altair_chart(theme((bars + labels).properties(height=alt.Step(25))).interactive(),
-                    use_container_width=True)
-
-    # --- WOH Distribution by Protein ---
-    if "Protein" in df.columns and not df["Protein"].isna().all():
-        st.subheader("WOH Distribution by Protein")
-        total_skus = df.shape[0]
-        total_prots = df["Protein"].nunique()
-        st.markdown(f"**{total_skus:,}** SKUs across **{total_prots}** Proteins")
-        order_p = (
-            df.groupby("Protein")["WeeksOnHand"]
-              .median()
-              .sort_values(ascending=False)
-              .index.tolist()
-        )
-        sel = alt.selection_point(fields=["Protein"], bind="legend")
-        box = alt.Chart(df).mark_boxplot(extent="min-max").encode(
-            x=alt.X("WeeksOnHand:Q", title="Weeks-On-Hand"),
-            y=alt.Y("Protein:N", sort=order_p, title="Protein"),
-            color="Protein:N",
-            opacity=alt.condition(sel, alt.value(1), alt.value(0.2)),
-            tooltip=[
-                alt.Tooltip("Protein:N", title="Protein"),
-                alt.Tooltip("count():Q", title="SKUs", format=",.0f"),
-                alt.Tooltip("median(WeeksOnHand):Q", title="Median WOH", format=".1f")
-            ]
-        ).add_selection(sel)
-        jitter = alt.Chart(df).transform_calculate(
-            y_jitter="(random() - 0.5) * 0.6"
-        ).mark_circle(size=18).encode(
-            x=alt.X("WeeksOnHand:Q", title="Weeks-On-Hand"),
-            y=alt.Y("Protein:N", sort=order_p, title="Protein"),
-            yOffset="y_jitter:Q",
-            color="Protein:N",
-            opacity=alt.condition(sel, alt.value(0.6), alt.value(0.1)),
-            tooltip=[
-                alt.Tooltip("SKU_Desc:N", title="SKU"),
-                alt.Tooltip("Protein:N", title="Protein"),
-                alt.Tooltip("WeeksOnHand:Q", title="WOH", format=".1f")
-            ]
-        )
-        st.altair_chart(theme((box + jitter).properties(height=400)).interactive(),
-                        use_container_width=True)
-    else:
-        st.warning("Cannot display WOH Distribution by Protein: Protein column missing or all values are NaN.")
+    st.info("This tab helps optimize inventory between Freezer (FZ) and EXT, and calculates precise parent-level purchase requirements. Parent codes are shown for purchasing only if their total inventory is insufficient—including all child codes—to meet your target weeks-on-hand.")
