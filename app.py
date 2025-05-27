@@ -2,7 +2,7 @@
 import os
 import tempfile
 from pathlib import Path
-from datetime import datetime
+t from datetime import datetime
 import logging
 
 import streamlit as st
@@ -29,175 +29,121 @@ from tabs import (
     bin_scan,
 )
 
-# -----------------------
-# Logger Configuration
-# -----------------------
-logger = logging.getLogger("inventory_app")
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Streamlit page config
+st.set_page_config(page_title="⚙️ Advanced Inventory Dashboard", layout="wide")
+
+# Utility: apply chart theme
+def apply_theme(chart):
+    return (
+        chart
+        .configure_axis(labelFontSize=12, titleFontSize=14)
+        .configure_legend(labelFontSize=12, titleFontSize=14)
     )
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
 
-# -----------------------
-# App & Page Settings
-# -----------------------
-st.set_page_config(
-    page_title="⚙️ Advanced Inventory Dashboard",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-st.title("⚙️ Advanced Inventory Management Dashboard")
+# Persistent upload handling
+if "uploaded_file" not in st.session_state:
+    st.session_state.uploaded_file = None
+    st.session_state.temp_path = None
 
-# -----------------------
-# Session State for File
-# -----------------------
-if "file_path" not in st.session_state:
-    st.session_state.file_path = None
-if "file_ts" not in st.session_state:
-    st.session_state.file_ts = None
-
-# -----------------------
-# File Upload / Persistence
-# -----------------------
-uploaded = st.sidebar.file_uploader("Upload master .xlsx", type="xlsx")
-if uploaded:
-    # Delete old file
-    old_path = st.session_state.file_path
-    if old_path and Path(old_path).exists():
+raw_file = st.sidebar.file_uploader("Upload master .xlsx", type="xlsx")
+if raw_file:
+    # save to temp file
+    tmp_dir = Path(tempfile.gettempdir()) / "inventory_uploads"
+    tmp_dir.mkdir(exist_ok=True)
+    # delete old
+    if st.session_state.temp_path and os.path.exists(st.session_state.temp_path):
         try:
-            Path(old_path).unlink()
-        except Exception as err:
-            logger.error(f"Failed to delete old file: {err}")
-
-    # Save new file to temp
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    tmp_dir = Path(tempfile.gettempdir())
-    tmp_path = tmp_dir / f"inv_upload_{timestamp}_{uploaded.name}"
+            os.remove(st.session_state.temp_path)
+        except Exception as e:
+            logger.warning(f"Failed to delete old upload: {e}")
+    # write new
+    tmp_path = tmp_dir / f"upload_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.xlsx"
     with open(tmp_path, "wb") as f:
-        f.write(uploaded.getbuffer())
+        f.write(raw_file.getbuffer())
+    st.session_state.uploaded_file = tmp_path
+    st.session_state.temp_path = str(tmp_path)
 
-    st.session_state.file_path = str(tmp_path)
-    st.session_state.file_ts = datetime.now()
-
-# Ensure a file is present
-if not st.session_state.file_path:
+if not st.session_state.uploaded_file:
     st.sidebar.warning("Please upload your master .xlsx to begin.")
     st.stop()
 
-# Upload Info Panel
-with st.sidebar.expander("Upload Info", expanded=False):
-    st.markdown(f"**File:** {Path(st.session_state.file_path).name}")
-    st.markdown(
-        f"**Uploaded:** {st.session_state.file_ts.strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-
-# -----------------------
-# Data Loading & Caching
-# -----------------------
-@st.cache_data(show_spinner=False)
-def load_everything(file_path: str):
-    logger.info(f"Loading sheets from {file_path}")
+# Load & cache data
+'tdata_key = str(st.session_state.temp_path)
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_everything(path):
     try:
-        with open(file_path, 'rb') as f:
+        with open(path, 'rb') as f:
             sheets = load_sheets(f)
     except Exception as e:
         raise RuntimeError(f"Error loading Excel sheets: {e}")
 
-    # Main pipeline
+    # pipeline
     sales_df, inv_df, prod_df, cost_df = preprocess_data(
-        sheets.get("Sales History"),
-        sheets.get("Inventory Detail"),
-        sheets.get("Production Batch"),
-        sheets.get("Cost Value"),
+        sheets.get("Sales History", pd.DataFrame()),
+        sheets.get("Inventory Detail", pd.DataFrame()),
+        sheets.get("Production Batch", pd.DataFrame()),
+        sheets.get("Cost Value", pd.DataFrame()),
     )
     agg_sales = aggregate_sales_history(sales_df)
     merged = merge_data(agg_sales, inv_df, prod_df, cost_df)
     df_woh = aggregate_final_data(merged, sales_df)
 
-    # Holding-cost pipeline
-    snap = process_inventory_snapshot(sheets.get("Inventory Detail"))
+    snap = process_inventory_snapshot(sheets.get("Inventory Detail", pd.DataFrame()))
     df_hc = compute_holding_cost(snap)
 
-    # Additional sheets
     inv1_df = process_inventory_detail1(sheets.get("Inventory Detail1", pd.DataFrame()))
     mikuni_df = sheets.get("Mikuni", pd.DataFrame())
 
     return df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df
 
-# Show loading spinner
+# Load data with spinner
 with st.spinner("Processing inventory data..."):
-    df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df = load_everything(
-        st.session_state.file_path
-    )
+    df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df = load_everything(st.session_state.uploaded_file)
 
-# -----------------------
-# Post-processing & Protein Merge
-# -----------------------
-# Ensure SKU is string
-prod_df["SKU"] = prod_df.get("SKU", pd.Series(dtype=str)).astype(str)
-df_woh["SKU"] = df_woh.get("SKU", pd.Series(dtype=str)).astype(str)
+# Merge Protein safely
+df_woh['SKU'] = df_woh['SKU'].astype(str)
+if 'SKU' in prod_df.columns:
+    prod_df['SKU'] = prod_df['SKU'].astype(str)
 
-# Merge Protein if present
-if "Protein" in prod_df.columns:
-    df_woh = df_woh.merge(
-        prod_df[["SKU", "Protein"]], on="SKU", how="left"
-    )
-    df_woh["Protein"] = df_woh["Protein"].fillna("Unknown")
+if 'Protein' in prod_df.columns:
+    df_woh = df_woh.drop(columns=['Protein'], errors='ignore')
+    df_woh = df_woh.merge(prod_df[['SKU','Protein']], on='SKU', how='left')
+    df_woh['Protein'] = df_woh['Protein'].fillna('Unknown')
 else:
-    logger.warning("'Protein' column missing; defaulting to 'Unknown'")
-    df_woh["Protein"] = "Unknown"
+    logger.warning("'Protein' column missing in production data; defaulting to 'Unknown'")
+    df_woh['Protein'] = 'Unknown'
 
-# -----------------------
-# Download Processed Data
-# -----------------------
-st.sidebar.download_button(
-    label="Download KPI Data (CSV)",
-    data=df_woh.to_csv(index=False).encode("utf-8"),
-    file_name="processed_inventory_kpis.csv",
-    mime="text/csv",
-)
-
-# -----------------------
-# Filters
-# -----------------------
-prot_opts = ["All"] + sorted(df_woh["Protein"].unique())
-state_opts = ["All"] + sorted(df_woh.get("ProductState", pd.Series(dtype=str)).unique())
-sku_opts = ["All"] + sorted(df_woh.get("SKU_Desc", pd.Series(dtype=str)).unique())
+# Sidebar filters
+prot_opts = ['All'] + sorted(df_woh['Protein'].unique())
+state_opts = ['All'] + sorted(df_woh.get('ProductState', pd.Series()).unique())
+sku_opts = ['All'] + sorted(df_woh.get('SKU_Desc', pd.Series()).unique())
 
 f_p = st.sidebar.selectbox("Protein", prot_opts)
 f_s = st.sidebar.selectbox("State", state_opts)
-f_k = st.sidebar.selectbox("SKU Desc", sku_opts)
+f_k = st.sidebar.selectbox("SKU", sku_opts)
 
-condition = (
-    ((f_p == "All") | (df_woh["Protein"] == f_p))
-    & ((f_s == "All") | (df_woh["ProductState"] == f_s))
-    & ((f_k == "All") | (df_woh["SKU_Desc"] == f_k))
+mask = (
+    ((f_p == 'All') | (df_woh['Protein'] == f_p)) &
+    ((f_s == 'All') | (df_woh.get('ProductState') == f_s)) &
+    ((f_k == 'All') | (df_woh.get('SKU_Desc') == f_k))
 )
-filtered = df_woh[condition]
+filtered = df_woh[mask].copy()
 
-# -----------------------
-# Section Navigation
-# -----------------------
+# Section picker
 section = st.sidebar.radio(
     "Select Section",
     ["📈 KPIs","📊 WOH","🚀 Movers","💰 Holding Cost","🔎 Insights","🗺 Bin Scan"],
+    index=0
 )
 
-# -----------------------
-# Chart Theming
-# -----------------------
-def apply_theme(chart):
-    return chart.configure_axis(labelFontSize=12, titleFontSize=14).configure_legend(
-        labelFontSize=12, titleFontSize=14
-    )
+# Title
+st.title("⚙️ Advanced Inventory Management Dashboard")
 
-# -----------------------
-# Render Selected Section
-# -----------------------
+# Dispatch
 if section == "📈 KPIs":
     kpis.render(filtered, df_hc, apply_theme)
 elif section == "📊 WOH":
