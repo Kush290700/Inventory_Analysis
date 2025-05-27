@@ -20,43 +20,36 @@ def compute_parent_purchase_plan(
     cost_df: pd.DataFrame,
     desired_woh: float
 ) -> pd.DataFrame:
-    """
-    Build a parent-level purchase plan. Every child SKU (one that
-    appears in Velocity Parent) rolls up into its parent; rows
-    with blank ParentSKU map to themselves.
-    """
-
-    # 1) Detect the real column names in pd_detail
+    # 1) Detect & rename detail columns
     cols = pd_detail.columns.tolist()
-    code_col = next((c for c in cols if "product code" in c.lower()), None)
-    parent_col = next((c for c in cols if "velocity" in c.lower() and "parent" in c.lower()), None)
-    desc_col = next((c for c in cols if c.lower().strip() == "description"), None)
-
-    # 2) Rename to our three keys, if found
     rename_map = {}
-    if code_col:   rename_map[code_col]   = "SKU"
-    if parent_col: rename_map[parent_col] = "ParentSKU"
-    if desc_col:   rename_map[desc_col]   = "ParentDesc"
+    for key, new in [("product code","SKU"), ("velocity parent","ParentSKU"), ("description","ParentDesc")]:
+        match = next((c for c in cols if c.lower().strip()==key), None)
+        if match:
+            rename_map[match] = new
 
     detail = pd_detail.rename(columns=rename_map)
 
-    # 3) Guarantee those three columns exist
-    detail["SKU"]       = detail.get("SKU", pd.NA).astype(str)
-    detail["ParentSKU"] = detail.get("ParentSKU", pd.NA).astype(str)
-    detail["ParentDesc"]= detail.get("ParentDesc", pd.NA).astype(str)
+    # 2) Guarantee we have Series for SKU, ParentSKU, ParentDesc
+    for col in ("SKU","ParentSKU","ParentDesc"):
+        if col not in detail.columns:
+            # create an empty string series of the same length
+            detail[col] = ""
+        # now every detail[col] is a Series, safe to cast
+        detail[col] = detail[col].astype(str).str.strip()
 
-    # 4) Blank ParentSKU → self (true parents)
-    detail["ParentSKU"] = detail["ParentSKU"].str.strip().replace({"": pd.NA})
+    # 3) True parents map to themselves
+    detail["ParentSKU"] = detail["ParentSKU"].replace({"": pd.NA})
     detail["ParentSKU"] = detail["ParentSKU"].fillna(detail["SKU"])
 
-    # 5) Keep only one row per SKU
+    # 4) Deduplicate
     detail = detail.drop_duplicates(subset=["SKU"])
 
-    # 6) Build mapping series
+    # 5) Build mapping series
     child_to_parent = detail.set_index("SKU")["ParentSKU"]
     parent_desc_map = detail.set_index("SKU")["ParentDesc"]
 
-    # 7) Roll up inventory at child level
+    # 6) Roll up inventory at the child level
     child_agg = (
         df_inv
         .groupby(["SKU","SKU_Desc"], as_index=False)
@@ -67,14 +60,14 @@ def compute_parent_purchase_plan(
         )
     )
 
-    # 8) Map children → parents
+    # 7) Map each child to its parent
     child_agg["ParentSKU"] = (
         child_agg["SKU"]
         .map(child_to_parent)
         .fillna(child_agg["SKU"])
     )
 
-    # 9) Aggregate to parent level
+    # 8) Aggregate up to parent
     parent_agg = (
         child_agg
         .groupby("ParentSKU", as_index=False)
@@ -86,28 +79,33 @@ def compute_parent_purchase_plan(
         .rename(columns={"ParentSKU":"SKU"})
     )
 
-    # 10) Parent description: detail first, fallback to child SKU_Desc
+    # 9) Parent description: detail first, then fallback to the child SKU_Desc
     inv_desc = child_agg.drop_duplicates("SKU").set_index("SKU")["SKU_Desc"]
     parent_agg["SKU_Desc"] = (
         parent_agg["SKU"]
         .map(parent_desc_map)
-        .where(lambda s: s.notna() & (s!=""), np.nan)
+        .where(lambda s: s.notna() & (s!="" ), np.nan)
         .combine_first(parent_agg["SKU"].map(inv_desc))
         .fillna(parent_agg["SKU"])
     )
 
-    # 11) PackCount from cost_df
+    # 10) Compute PackCount from cost_df
     if "NumPacks" in cost_df.columns:
         packs = (
             pd.to_numeric(cost_df["NumPacks"], errors="coerce")
               .fillna(1).astype(int)
         )
         pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str))
-        parent_agg["PackCount"] = parent_agg["SKU"].map(pack_map).fillna(1).astype(int)
+        parent_agg["PackCount"] = (
+            parent_agg["SKU"]
+            .map(pack_map)
+            .fillna(1)
+            .astype(int)
+        )
     else:
         parent_agg["PackCount"] = 1
 
-    # 12) Compute order quantities & cost
+    # 11) Compute order quantities & costs
     parent_agg["PackWt"]       = parent_agg["InvWt"] / parent_agg["PackCount"]
     parent_agg["DesiredWt"]    = parent_agg["MeanUse"] * desired_woh
     parent_agg["ToBuyWt"]      = (parent_agg["DesiredWt"] - parent_agg["InvWt"]).clip(lower=0)
@@ -116,12 +114,13 @@ def compute_parent_purchase_plan(
     parent_agg["CostPerLb"]    = parent_agg["InvCost"] / parent_agg["InvWt"]
     parent_agg["EstCost"]      = parent_agg["OrderWt"] * parent_agg["CostPerLb"]
 
-    # 13) Return only parents needing orders
+    # 12) Return only parents that need ordering
     return parent_agg[parent_agg["PacksToOrder"] > 0]
     
 def render(df, df_hc, cost_df, theme, sheets):
     st.header("📊 Weeks-On-Hand Analysis")
-
+    pd_detail = sheets.get("Product Detail", pd.DataFrame())
+    plan_df   = compute_parent_purchase_plan(df_pr, pd_detail, cost_df, desired_woh)
     # ── Compute PackCount & AvgWeightPerPack ───────────────────────────────
     if "NumPacks" in cost_df.columns:
         packs_series = (
