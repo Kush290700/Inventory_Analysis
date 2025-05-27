@@ -55,117 +55,69 @@ def compute_parent_purchase_plan(
     child_to_parent = dict(zip(d["SKU"], d["ParentSKU"]))
     parent_desc_map = dict(zip(d["ParentSKU"], d["ParentDesc"]))
 
-    # --- Compute DesiredWt & ToBuyWt at child level ---
+    # --- Map each SKU to its parent ---
     inv = df_inv.copy()
     inv["SKU"] = inv["SKU"].astype(str).str.strip()
     inv["SKU_Desc"] = inv["SKU_Desc"].astype(str).str.strip()
-    child = (
-        inv.groupby(["SKU", "SKU_Desc"], as_index=False)
+    inv["ParentSKU"] = inv["SKU"].map(child_to_parent).fillna(inv["SKU"])
+
+    # --- Aggregate all stats to parent SKU level ---
+    parent_df = (
+        inv.groupby("ParentSKU", as_index=False)
            .agg(
-               MeanUse=("AvgWeeklyUsage", "mean"),
+               MeanUse=("AvgWeeklyUsage", "sum"),
                InvWt=("OnHandWeightTotal", "sum"),
                InvCost=("OnHandCostTotal", "sum")
            )
     )
-    child["DesiredWt"] = child["MeanUse"] * desired_woh
-    child["ToBuyWt"] = (child["DesiredWt"] - child["InvWt"]).clip(lower=0)
-    child["ParentSKU"] = child["SKU"].map(child_to_parent).fillna(child["SKU"])
 
-    # --- Assign PackCount at child level ---
+    parent_df["DesiredWt"] = parent_df["MeanUse"] * desired_woh
+    parent_df["ToBuyWt"] = (parent_df["DesiredWt"] - parent_df["InvWt"]).clip(lower=0)
+
+    # --- Assign pack count (average across children if available, or 1) ---
     if not cost_df.empty and "NumPacks" in cost_df.columns:
-        packs = pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int).clip(lower=1)
-        pack_map = pd.Series(packs.values, index=cost_df["SKU"].astype(str)).to_dict()
-        child["PackCount"] = child["SKU"].map(pack_map).fillna(1).astype(int)
+        pack_map = pd.Series(
+            pd.to_numeric(cost_df["NumPacks"], errors="coerce").fillna(1).astype(int).clip(lower=1).values,
+            index=cost_df["SKU"].astype(str)
+        ).to_dict()
+        parent_df["PackCount"] = parent_df["ParentSKU"].map(pack_map).fillna(1).astype(int)
     else:
-        child["PackCount"] = 1
+        parent_df["PackCount"] = 1
 
-    # Handle zero InvWt and PackCount
-    child["PackWt"] = np.where(
-        (child["InvWt"] > 0) & (child["PackCount"] > 0),
-        child["InvWt"] / child["PackCount"],
+    # --- Order weight logic: ---
+    parent_df["PackWt"] = np.where(
+        (parent_df["InvWt"] > 0) & (parent_df["PackCount"] > 0),
+        parent_df["InvWt"] / parent_df["PackCount"],
         0
     )
-    child["PacksToOrder"] = np.where(
-        child["PackWt"] > 0,
-        np.ceil(child["ToBuyWt"] / child["PackWt"]),
+    parent_df["PacksToOrder"] = np.where(
+        parent_df["PackWt"] > 0,
+        np.ceil(parent_df["ToBuyWt"] / parent_df["PackWt"]),
         0
     ).astype(int)
-    child["OrderWt"] = child["PacksToOrder"] * child["PackWt"]
+    parent_df["OrderWt"] = parent_df["PacksToOrder"] * parent_df["PackWt"]
 
-    # --- Aggregate to parent level ---
-    parent = (
-        child.groupby(["ParentSKU"], as_index=False)
-             .agg(
-                 MeanUse=("MeanUse", "sum"),
-                 InvWt=("InvWt", "sum"),
-                 InvCost=("InvCost", "sum"),
-                 ToBuyWt=("ToBuyWt", "sum"),
-                 PackCount=("PackCount", "mean"),
-                 PacksToOrder=("PacksToOrder", "sum"),
-                 OrderWt=("OrderWt", "sum")
-             )
-             .rename(columns={"ParentSKU": "SKU"})
-    )
+    # --- Add descriptions ---
+    parent_df["SKU"] = parent_df["ParentSKU"]
+    parent_df["SKU_Desc"] = parent_df["SKU"].map(parent_desc_map).fillna(parent_df["SKU"])
 
-    # --- Ensure all parent SKUs from product detail are present ---
-    # Identify all parent SKUs from product detail
-    all_parents = set(d["ParentSKU"].unique())
-    parent_in_plan = set(parent["SKU"].unique())
-    missing_parents = all_parents - parent_in_plan
-    if missing_parents:
-        # Try to pull their own inv data if present (as a parent-only SKU)
-        parent_rows = []
-        for sku in missing_parents:
-            # If the parent exists in inv, use its stats; else create a zero row
-            row = inv[inv["SKU"] == sku]
-            if not row.empty:
-                MeanUse = row["AvgWeeklyUsage"].mean()
-                InvWt = row["OnHandWeightTotal"].sum()
-                InvCost = row["OnHandCostTotal"].sum()
-                DesiredWt = MeanUse * desired_woh
-                ToBuyWt = max(0, DesiredWt - InvWt)
-                PackCount = 1
-                PackWt = InvWt if InvWt > 0 else 0
-                PacksToOrder = int(np.ceil(ToBuyWt / PackWt)) if PackWt > 0 else (1 if ToBuyWt > 0 else 0)
-                OrderWt = PacksToOrder * PackWt
-                parent_rows.append(dict(
-                    SKU=sku,
-                    MeanUse=MeanUse,
-                    InvWt=InvWt,
-                    InvCost=InvCost,
-                    ToBuyWt=ToBuyWt,
-                    PackCount=PackCount,
-                    PacksToOrder=PacksToOrder,
-                    OrderWt=OrderWt
-                ))
-            else:
-                # Parent not in inv data at all: assume 0 inv, 0 use, and must order if desired_woh > 0
-                parent_rows.append(dict(
-                    SKU=sku,
-                    MeanUse=0,
-                    InvWt=0,
-                    InvCost=0,
-                    ToBuyWt=desired_woh if desired_woh > 0 else 0,
-                    PackCount=1,
-                    PacksToOrder=1 if desired_woh > 0 else 0,
-                    OrderWt=desired_woh if desired_woh > 0 else 0
-                ))
-        parent = pd.concat([parent, pd.DataFrame(parent_rows)], ignore_index=True, sort=False)
-
-    # --- Assign parent descriptions ---
-    parent["SKU_Desc"] = parent["SKU"].map(parent_desc_map).fillna(parent["SKU"])
-
-    # --- Compute cost metrics ---
-    parent["CostPerLb"] = np.where(
-        parent["InvWt"] > 0,
-        parent["InvCost"] / parent["InvWt"],
+    # --- Cost metrics ---
+    parent_df["CostPerLb"] = np.where(
+        parent_df["InvWt"] > 0,
+        parent_df["InvCost"] / parent_df["InvWt"],
         0
     )
-    parent["EstCost"] = parent["OrderWt"] * parent["CostPerLb"]
-    parent["DesiredWt"] = parent["MeanUse"] * desired_woh
+    parent_df["EstCost"] = parent_df["OrderWt"] * parent_df["CostPerLb"]
 
-    # --- Return only parents needing orders ---
-    return parent[parent["PacksToOrder"] > 0]
+    # --- Only return parents that actually need to be ordered ---
+    # (If total parent+children inv is enough, ToBuyWt=0)
+    plan = parent_df[parent_df["PacksToOrder"] > 0][
+        ["SKU", "SKU_Desc", "InvWt", "DesiredWt", "PackCount", "PacksToOrder", "OrderWt", "EstCost"]
+    ].copy()
+
+    # Reset index for clean display/export
+    plan.reset_index(drop=True, inplace=True)
+    return plan
 
 def render(df, df_hc, cost_df, theme, sheets):
     core_cols = [
