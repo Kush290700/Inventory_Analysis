@@ -119,8 +119,7 @@ def compute_parent_purchase_plan(
     
 def render(df, df_hc, cost_df, theme, sheets):
     st.header("📊 Weeks-On-Hand Analysis")
-    pd_detail = sheets.get("Product Detail", pd.DataFrame())
-    plan_df   = compute_parent_purchase_plan(df_pr, pd_detail, cost_df, desired_woh)
+
     # ── Compute PackCount & AvgWeightPerPack ───────────────────────────────
     if "NumPacks" in cost_df.columns:
         packs_series = (
@@ -311,7 +310,8 @@ def render(df, df_hc, cost_df, theme, sheets):
     supplier_opts     = ["All"] + sorted(df["Supplier"].astype(str).unique())
     selected_supplier = st.selectbox("Supplier", supplier_opts, key="pr_supplier")
     df_pr = df if selected_supplier=="All" else df[df["Supplier"]==selected_supplier]
-
+    pd_detail = sheets.get("Product Detail", pd.DataFrame())
+    plan_df   = compute_parent_purchase_plan(df_pr, pd_detail, cost_df, desired_woh)
     # Desired WOH slider
     desired_woh = st.slider(
         "Desired Weeks-On-Hand",
