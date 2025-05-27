@@ -14,50 +14,35 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.classification import compute_threshold_move
 
 @st.cache_data(show_spinner=False)
-def compute_purchase_plan(
-    df_pr: pd.DataFrame,
-    pd_detail: pd.DataFrame,
-    cost_df: pd.DataFrame,
-    desired_woh: float
-) -> pd.DataFrame:
+def compute_purchase_plan(df_pr: pd.DataFrame,
+                          pd_detail: pd.DataFrame,
+                          cost_df: pd.DataFrame,
+                          desired_woh: float) -> pd.DataFrame:
     """
-    Returns a parent-level purchase plan DataFrame with columns:
+    Returns a parent-level purchase plan with:
       SKU, SKU_Desc, InvWt, DesiredWt, PackCount, PacksToOrder, OrderWt, EstCost
     """
 
-    # 1) Flexible header detection
-    cols = {c.lower().strip(): c for c in pd_detail.columns}
-    code_key   = next((k for k in cols if "product code" in k), None)
-    parent_key = next((k for k in cols if "velocity parent" in k), None)
-    desc_key   = next((k for k in cols if k == "description"), None)
+    # 1) Normalize & rename the detail sheet columns
+    detail = pd_detail.rename(columns={
+        # case must match exactly these source names
+        "Product Code":    "SKU",
+        "Velocity Parent": "ParentSKU",
+        "Description":     "ParentDesc"
+    })
+    # ensure those columns exist
+    for col in ("SKU","ParentSKU","ParentDesc"):
+        if col not in detail:
+            detail[col] = pd.NA
 
-    if code_key:
-        pd_detail = pd_detail.rename(columns={
-            cols[code_key]: "SKU",
-            **({cols[parent_key]: "ParentSKU"} if parent_key else {}),
-            **({cols[desc_key]:   "ParentDesc"} if desc_key else {})
-        }).drop_duplicates(subset=["SKU"])
-    else:
-        # no product-code column: force empty mapping
-        pd_detail = pd.DataFrame(columns=["SKU","ParentSKU","ParentDesc"])
+    detail = detail[["SKU","ParentSKU","ParentDesc"]].drop_duplicates(subset=["SKU"])
 
-    # ensure ParentSKU & ParentDesc exist
-    if "ParentSKU" not in pd_detail:
-        pd_detail["ParentSKU"] = pd.NA
-    if "ParentDesc" not in pd_detail:
-        pd_detail["ParentDesc"] = pd.NA
+    # 2) Build mapping series
+    detail["ParentSKU"] = detail["ParentSKU"].fillna(detail["SKU"]).astype(str)
+    child_to_parent    = detail.set_index("SKU")["ParentSKU"]
+    parent_desc_map    = detail.set_index("SKU")["ParentDesc"]
 
-    # normalize blank parents → NA, then fallback to SKU
-    pd_detail["ParentSKU"] = (
-        pd_detail["ParentSKU"].astype(str)
-                      .replace({"":pd.NA})
-    )
-    child_to_parent = pd_detail.set_index("SKU")["ParentSKU"].fillna(pd_detail["SKU"])
-
-    # description map: if missing, leave blank
-    parent_desc_map = pd_detail.set_index("SKU")["ParentDesc"]
-
-    # 2) Roll up at child level
+    # 3) Child-level rollup
     child_inv = (
         df_pr
         .groupby(["SKU","SKU_Desc"], as_index=False)
@@ -68,14 +53,14 @@ def compute_purchase_plan(
         )
     )
 
-    # 3) Map to parent (or itself)
+    # 4) Map each child up to its parent
     child_inv["ParentSKU"] = (
         child_inv["SKU"]
         .map(child_to_parent)
         .fillna(child_inv["SKU"])
     )
 
-    # 4) Aggregate to parent
+    # 5) Aggregate to parent
     parent_inv = (
         child_inv
         .groupby("ParentSKU", as_index=False)
@@ -87,21 +72,17 @@ def compute_purchase_plan(
         .rename(columns={"ParentSKU":"SKU"})
     )
 
-    # 5) Lookup parent description, fallback to original SKU_Desc when missing
-    desc_fallback = child_inv.drop_duplicates("SKU").set_index("SKU")["SKU_Desc"]
+    # 6) Parent description: detail first, then fallback to inventory
+    inv_desc_map = child_inv.drop_duplicates("SKU").set_index("SKU")["SKU_Desc"]
     parent_inv["SKU_Desc"] = (
         parent_inv["SKU"]
         .map(parent_desc_map)
-        .fillna(parent_inv["SKU"])
-        .where(lambda s: s.notna() & (s!="nan"), parent_inv["SKU"])
-    )
-    # if still missing description, pull child SKU_Desc
-    parent_inv["SKU_Desc"] = (
-        parent_inv["SKU_Desc"]
-        .combine_first(parent_inv["SKU"].map(desc_fallback))
+        .fillna(parent_inv["SKU"])                             # default to code
+        .where(lambda s: s.notna() & (s!=""), parent_inv["SKU"])
+        .combine_first(parent_inv["SKU"].map(inv_desc_map))     # fallback to original desc
     )
 
-    # 6) Compute PackCount
+    # 7) Compute PackCount
     if "NumPacks" in cost_df.columns:
         packs = (
             pd.to_numeric(cost_df["NumPacks"], errors="coerce")
@@ -112,7 +93,7 @@ def compute_purchase_plan(
     else:
         parent_inv["PackCount"] = 1
 
-    # 7) Compute order quantities & cost
+    # 8) Compute order quantities & cost
     parent_inv["PackWt"]       = parent_inv["InvWt"] / parent_inv["PackCount"]
     parent_inv["DesiredWt"]    = parent_inv["MeanUse"] * desired_woh
     parent_inv["ToBuyWt"]      = (parent_inv["DesiredWt"] - parent_inv["InvWt"]).clip(lower=0)
@@ -121,8 +102,9 @@ def compute_purchase_plan(
     parent_inv["CostPerLb"]    = parent_inv["InvCost"] / parent_inv["InvWt"]
     parent_inv["EstCost"]      = parent_inv["OrderWt"] * parent_inv["CostPerLb"]
 
-    # 8) Only parents needing an order
+    # 9) Only parents needing an order
     return parent_inv[parent_inv["PacksToOrder"] > 0]
+
     
 def render(df, df_hc, cost_df, theme, sheets):
     st.header("📊 Weeks-On-Hand Analysis")
@@ -313,37 +295,48 @@ def render(df, df_hc, cost_df, theme, sheets):
     # ── Purchase Recommendations by Desired WOH ──────────────────────────────
     st.subheader("🛒 Purchase Recommendations by Desired WOH")
 
-    # supplier filter
+    # a) Supplier filter
     supplier_opts     = ["All"] + sorted(df["Supplier"].astype(str).unique())
     selected_supplier = st.selectbox("Supplier", supplier_opts, key="pr_supplier")
-    df_pr = df if selected_supplier=="All" else df[df["Supplier"]==selected_supplier]
+    df_pr = df if selected_supplier == "All" else df[df["Supplier"] == selected_supplier]
 
-    # desired WOH
-    desired_woh = st.slider("Desired Weeks-On-Hand", 0.0, 52.0, 4.0, 0.5)
+    # b) Desired WOH slider
+    desired_woh = st.slider(
+        "Desired Weeks-On-Hand",
+        0.0, 52.0, 4.0, 0.5,
+        help="How many weeks’ worth of stock you want on hand"
+    )
 
-    # compute plan
-    pd_detail   = sheets.get("Product Detail", pd.DataFrame())
-    purchase_df = compute_purchase_plan(df_pr, pd_detail, cost_df, desired_woh)
+    # c) Compute purchase plan
+    pd_detail    = sheets.get("Product Detail", pd.DataFrame())
+    purchase_df  = compute_purchase_plan(df_pr, pd_detail, cost_df, desired_woh)
 
-    # format & display
+    # d) Format & display
     display = (
-        purchase_df[["SKU","SKU_Desc","InvWt","DesiredWt","PackCount","PacksToOrder","OrderWt","EstCost"]]
+        purchase_df[[
+            "SKU","SKU_Desc","InvWt","DesiredWt",
+            "PackCount","PacksToOrder","OrderWt","EstCost"
+        ]]
         .assign(
-          InvWt=lambda d: d["InvWt"].map("{:,.0f} lb".format),
-          DesiredWt=lambda d: d["DesiredWt"].map("{:,.0f} lb".format),
-          OrderWt=lambda d: d["OrderWt"].map("{:,.0f} lb".format),
-          EstCost=lambda d: d["EstCost"].map("${:,.2f}".format)
+            InvWt=lambda d: d["InvWt"].map("{:,.0f} lb".format),
+            DesiredWt=lambda d: d["DesiredWt"].map("{:,.0f} lb".format),
+            OrderWt=lambda d: d["OrderWt"].map("{:,.0f} lb".format),
+            EstCost=lambda d: d["EstCost"].map("${:,.2f}".format)
         )
     )
     st.dataframe(display, use_container_width=True)
 
-    # download
+    # e) Download button
     buf = io.BytesIO()
     purchase_df.to_excel(buf, index=False, sheet_name="PurchasePlan")
     buf.seek(0)
-    st.download_button("📥 Download Purchase Plan", buf.getvalue(),
-                       file_name="Purchase_Plan.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "📥 Download Purchase Plan",
+        data=buf.getvalue(),
+        file_name="Purchase_Plan.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
     
     # ── Distribution of WOH ─────────────────────────────────────
     st.subheader("Distribution of Weeks-On-Hand")
