@@ -20,9 +20,6 @@ def compute_parent_purchase_plan(
     cost_df: pd.DataFrame,
     desired_woh: float
 ) -> pd.DataFrame:
-    """
-    Aggregates inventory to parent SKU and computes purchase plan based on desired weeks-on-hand.
-    """
     try:
         # ---- Validation ----
         required_cols = {
@@ -35,11 +32,13 @@ def compute_parent_purchase_plan(
             if df_name == 'cost_df' and (df is None or df.empty):
                 continue
             if df is None or df.empty:
-                st.error(f"{df_name} is empty")
+                st.error(f"{df_name} is empty (rows: {0 if df is None else len(df)})")
+                st.write(f"**DEBUG {df_name}:**", df)
                 return pd.DataFrame()
             missing_cols = [c for c in cols if c not in df.columns]
             if missing_cols:
                 st.error(f"Missing columns in {df_name}: {missing_cols}")
+                st.write(f"**DEBUG {df_name} columns:**", df.columns)
                 return pd.DataFrame()
 
         # ---- Product Details ----
@@ -122,10 +121,16 @@ def compute_parent_purchase_plan(
             ["SKU", "SKU_Desc", "Supplier", "InvWt", "DesiredWt", "PackSize", "PacksToOrder", "OrderWt", "EstCost"]
         ].copy()
         result.reset_index(drop=True, inplace=True)
+
+        # DEBUG: Show result size and head
+        st.write("**DEBUG: Purchase Plan Rows:**", result.shape[0])
+        st.write(result.head())
+
         return result
 
     except Exception as e:
         st.error(f"Error generating purchase plan: {str(e)}")
+        st.write("**DEBUG Exception in compute_parent_purchase_plan:**", str(e))
         return pd.DataFrame()
 
 def render(df, df_hc, cost_df, theme, sheets):
@@ -140,101 +145,6 @@ def render(df, df_hc, cost_df, theme, sheets):
         df["SKU_Desc"] = df["SKU_Desc"].astype(str).str.strip()
         df["ProductState"] = df["ProductState"].astype(str).str.upper().fillna("")
 
-        # === FZ → EXT ===
-        st.subheader("🔄 Move FZ → EXT (Reduce Freezer Overstock)")
-        fz = df[df["ProductState"].str.startswith("FZ") & (df["AvgWeeklyUsage"] > 0)].copy()
-        ext = df[df["ProductState"].str.startswith("EXT") & (df["AvgWeeklyUsage"] > 0)].copy()
-        ext_weight_lookup = ext.set_index("SKU")["OnHandWeightTotal"]
-        thr1 = st.slider(
-            "Set target max FZ WOH (weeks):", 0.0, 12.0, 2.0, 0.25, key="fz2ext_thr"
-        )
-        fz["DesiredFZ_Weight"] = fz["AvgWeeklyUsage"] * thr1
-        fz["WeightToMove"] = (fz["OnHandWeightTotal"] - fz["DesiredFZ_Weight"]).clip(lower=0)
-        fz["EXT_Weight"] = fz["SKU"].map(ext_weight_lookup).fillna(0)
-        fz["TotalOnHand"] = fz["OnHandWeightTotal"] + fz["EXT_Weight"]
-        mv1 = fz[(fz["WeeksOnHand"] > thr1) & (fz["WeightToMove"] > 0)].copy()
-        mv1["CostToMove"] = np.where(
-            mv1["OnHandWeightTotal"] > 0,
-            (mv1["WeightToMove"] / mv1["OnHandWeightTotal"]) * mv1["OnHandCostTotal"],
-            0
-        )
-        # Chart
-        if not mv1.empty:
-            mv1_top = mv1.nlargest(10, "WeightToMove")
-            chart1 = alt.Chart(mv1_top).mark_bar().encode(
-                x=alt.X("WeightToMove:Q", title="Weight to Move (lb)"),
-                y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
-                color="Supplier:N",
-                tooltip=[
-                    alt.Tooltip("SKU:N"),
-                    alt.Tooltip("SKU_Desc:N", title="SKU Desc"),
-                    alt.Tooltip("Supplier:N"),
-                    alt.Tooltip("WeightToMove:Q", format=",.0f"),
-                    alt.Tooltip("CostToMove:Q", format="$.0f")
-                ]
-            ).properties(height=320, title="Top SKUs to Move FZ→EXT")
-            st.altair_chart(chart1, use_container_width=True)
-
-        st.metric("SKUs to Move", int(mv1["SKU"].nunique()))
-        st.metric("Total Weight to Move", f"{mv1['WeightToMove'].sum():,.0f} lb")
-        st.metric("Total Cost to Move", f"${mv1['CostToMove'].sum():,.0f}")
-        if not mv1.empty:
-            buf1 = io.BytesIO()
-            mv1.to_excel(buf1, index=False, sheet_name="FZ2EXT")
-            buf1.seek(0)
-            st.download_button(
-                "⬇️ Download FZ→EXT List",
-                buf1.getvalue(),
-                file_name="FZ2EXT_list.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-        # === EXT → FZ ===
-        st.subheader("🔄 Move EXT → FZ (Refill Freezer Understock)")
-        fz_weight_lookup = fz.set_index("SKU")["OnHandWeightTotal"]
-        thr2 = st.slider(
-            "Set min FZ WOH to achieve:", 0.0, 12.0, 2.0, 0.25, key="ext2fz_thr"
-        )
-        ext["FZ_Weight"] = ext["SKU"].map(fz_weight_lookup).fillna(0)
-        ext["DesiredFZ_Weight"] = ext["AvgWeeklyUsage"] * thr2
-        ext["WeightToReturn"] = (ext["DesiredFZ_Weight"] - ext["FZ_Weight"]).clip(lower=0)
-        ext["TotalOnHand"] = ext["OnHandWeightTotal"] + ext["FZ_Weight"]
-        mv2 = ext[(ext["FZ_Weight"] < ext["DesiredFZ_Weight"]) & (ext["WeightToReturn"] > 0)].copy()
-        mv2["CostToReturn"] = np.where(
-            mv2["OnHandWeightTotal"] > 0,
-            (mv2["WeightToReturn"] / mv2["OnHandWeightTotal"]) * mv2["OnHandCostTotal"],
-            0
-        )
-        if not mv2.empty:
-            mv2_top = mv2.nlargest(10, "WeightToReturn")
-            chart2 = alt.Chart(mv2_top).mark_bar().encode(
-                x=alt.X("WeightToReturn:Q", title="Weight to Return (lb)"),
-                y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
-                color="Supplier:N",
-                tooltip=[
-                    alt.Tooltip("SKU:N"),
-                    alt.Tooltip("SKU_Desc:N", title="SKU Desc"),
-                    alt.Tooltip("Supplier:N"),
-                    alt.Tooltip("WeightToReturn:Q", format=",.0f"),
-                    alt.Tooltip("CostToReturn:Q", format="$.0f")
-                ]
-            ).properties(height=320, title="Top SKUs to Return EXT→FZ")
-            st.altair_chart(chart2, use_container_width=True)
-
-        st.metric("SKUs to Return", int(mv2["SKU"].nunique()))
-        st.metric("Total Weight to Return", f"{mv2['WeightToReturn'].sum():,.0f} lb")
-        st.metric("Total Cost to Return", f"${mv2['CostToReturn'].sum():,.0f}")
-        if not mv2.empty:
-            buf2 = io.BytesIO()
-            mv2.to_excel(buf2, index=False, sheet_name="EXT2FZ")
-            buf2.seek(0)
-            st.download_button(
-                "⬇️ Download EXT→FZ List",
-                buf2.getvalue(),
-                file_name="EXT2FZ_list.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
         # === Purchase Plan (Parent) ===
         st.subheader("🛒 Purchase Recommendations by Desired WOH (Parent SKUs Only)")
         supplier_opts = ["All"] + sorted(df["Supplier"].astype(str).unique())
@@ -242,10 +152,20 @@ def render(df, df_hc, cost_df, theme, sheets):
             "Filter Purchase Plan by Supplier:", supplier_opts, key="pr_supplier"
         )
         df_pr = df if selected_supplier == "All" else df[df["Supplier"] == selected_supplier]
+
+        # DIAGNOSTIC: Show the filtered DataFrame and its columns
+        st.write("**DEBUG: df_pr shape:**", df_pr.shape)
+        st.write("**DEBUG: df_pr columns:**", df_pr.columns)
+        pd_detail = sheets.get("Product Detail", pd.DataFrame())
+        st.write("**DEBUG: pd_detail shape:**", pd_detail.shape)
+        st.write("**DEBUG: pd_detail columns:**", pd_detail.columns)
+        st.write("**DEBUG: cost_df shape:**", (0 if cost_df is None else cost_df.shape))
+        if cost_df is not None:
+            st.write("**DEBUG: cost_df columns:**", cost_df.columns)
+
         desired_woh = st.slider(
             "Desired Weeks-On-Hand for Purchase Plan", 0.0, 12.0, 4.0, 0.5
         )
-        pd_detail = sheets.get("Product Detail", pd.DataFrame())
         plan_df = compute_parent_purchase_plan(df_pr, pd_detail, cost_df, desired_woh)
         if not plan_df.empty:
             plan_display = (
@@ -288,3 +208,4 @@ def render(df, df_hc, cost_df, theme, sheets):
 
     except Exception as e:
         st.error(f"Error rendering the dashboard: {str(e)}")
+        st.write("**DEBUG Exception in render:**", str(e))
