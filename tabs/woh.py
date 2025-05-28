@@ -391,98 +391,98 @@ def woh_tab(sheets, theme):
             st.altair_chart(theme(chart2).interactive(), use_container_width=True)
 
     # --- Parent Purchase Plan ---
-with tab3:
-    st.subheader("🛒 Usage-Based Parent Purchase Plan with Delivery Intelligence")
-
-    # ADD THIS LINE:
-    desired_woh = st.slider("Desired Weeks On Hand (WOH) for Parent Purchase Plan", 0.0, 12.0, 4.0, 0.5)
-
-    # --- Filters (Supplier and Protein) ---
-    all_suppliers = sorted(sku_stats["Supplier"].dropna().unique())
-    all_proteins = sorted(sku_stats["Protein"].dropna().unique())
-    selected_supplier = st.selectbox("Supplier Filter", ["All"] + all_suppliers)
-    selected_protein = st.selectbox("Protein Filter", ["All"] + all_proteins)
-
-    # --- Parent Purchase Plan Aggregation ---
-    child_to_parent = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
-    parent_desc_map = dict(zip(prod_detail['ParentSKU'], prod_detail['Description'].fillna("").astype(str)))
-    sku_stats['ParentSKU'] = sku_stats['SKU'].map(child_to_parent).fillna(sku_stats['SKU'])
-    mask = (sku_stats["ParentSKU"].isin(["", "nan", "none", "null"])) | (sku_stats["ParentSKU"].isna())
-    sku_stats.loc[mask, "ParentSKU"] = sku_stats.loc[mask, "SKU"]
-
-    parent_stats = (
-        sku_stats.groupby("ParentSKU", as_index=False)
-            .agg(
-                MeanUse=('AvgWeeklyUsage', 'sum'),
-                InvWt=('OnHandWeightTotal', 'sum'),
-                InvCost=('OnHandCostTotal', 'sum'),
-                Supplier=('Supplier', lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0]),
-                Protein=('Protein', lambda x: x.mode()[0] if not x.mode().empty else ""),
-            )
-    )
-    parent_stats['DesiredWt'] = parent_stats['MeanUse'] * desired_woh
-    parent_stats['ToBuyWt'] = (parent_stats['DesiredWt'] - parent_stats['InvWt']).clip(lower=0)
-    packsize_map = sku_stats.groupby('ParentSKU')['PackSize'].median()
-    global_packsize = sku_stats['PackSize'].dropna().mean()
-    parent_stats['PackSize'] = parent_stats['ParentSKU'].map(packsize_map).fillna(global_packsize if not np.isnan(global_packsize) else 1.0)
-    parent_stats['PacksToOrder'] = np.where(
-        parent_stats['PackSize'] > 0, np.ceil(parent_stats['ToBuyWt'] / parent_stats['PackSize']), 0
-    ).astype(int)
-    parent_stats['OrderWt'] = parent_stats['PacksToOrder'] * parent_stats['PackSize']
-    parent_stats['SKU'] = parent_stats['ParentSKU']
-    parent_stats['SKU_Desc'] = parent_stats['SKU'].map(parent_desc_map).fillna(parent_stats['SKU'])
-    parent_stats['CostPerLb'] = np.where(
-        parent_stats['InvWt'] > 0,
-        parent_stats['InvCost'] / parent_stats['InvWt'],
-        0
-    )
-    parent_stats['EstCost'] = parent_stats['OrderWt'] * parent_stats['CostPerLb']
-
-    # Filter out parents with no packs to order
-    plan_df = parent_stats[parent_stats['PacksToOrder'] > 0].copy()
-    plan_df["SpecialOrderFlag"] = plan_df["SKU"].str.contains("SO01", na=False) | plan_df["SKU_Desc"].str.contains("SO01", na=False)
-    plan_df["SO Note"] = np.where(plan_df["SpecialOrderFlag"], "SO01 Special Order", "")
-
-    # --- Delivery Info ---
-    delivery_info = plan_df["Supplier"].apply(lambda s: get_next_delivery(s))
-    plan_df["NextCutoff"] = delivery_info.apply(lambda d: d["cutoff_datetime"].strftime("%a %H:%M") if d["found"] else "")
-    plan_df["NextDelivery"] = delivery_info.apply(lambda d: d["delivery_date"].strftime("%Y-%m-%d") if d["found"] and d["delivery_date"] else "")
-    plan_df["DeliveryNotes"] = delivery_info.apply(lambda d: d["notes"] if d["found"] else d.get("reason", ""))
-
-    # --- Filters ---
-    if selected_supplier != "All":
-        plan_df = plan_df[plan_df["Supplier"] == selected_supplier]
-    if selected_protein != "All":
-        plan_df = plan_df[plan_df["Protein"] == selected_protein]
-
-    display_cols = [
-        "SKU", "SKU_Desc", "Supplier", "Protein", "InvWt", "DesiredWt",
-        "PackSize", "PacksToOrder", "OrderWt", "EstCost",
-        "SO Note", "NextCutoff", "NextDelivery", "DeliveryNotes"
-    ]
-    display = plan_df[display_cols].copy()
-    display["InvWt"] = display["InvWt"].map("{:,.0f} lb".format)
-    display["DesiredWt"] = display["DesiredWt"].map("{:,.0f} lb".format)
-    display["PackSize"] = display["PackSize"].map("{:,.0f} lb".format)
-    display["OrderWt"] = display["OrderWt"].map("{:,.0f} lb".format)
-    display["EstCost"] = display["EstCost"].map("${:,.2f}".format)
-
-    st.dataframe(display, use_container_width=True)
-
-    buf = io.BytesIO()
-    display.to_excel(buf, index=False, sheet_name="PurchasePlan")
-    buf.seek(0)
-    st.download_button("📥 Download Purchase Plan", data=buf.getvalue(), file_name="Purchase_Plan.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    supplier_summary = (
-        plan_df.groupby("Supplier", as_index=False)["EstCost"].sum()
-        .sort_values("EstCost", ascending=False)
-        .head(10)
-    )
-    if not supplier_summary.empty:
-        pie = alt.Chart(supplier_summary).mark_arc(innerRadius=50).encode(
-            theta=alt.Theta(field="EstCost", type="quantitative", stack=True),
-            color=alt.Color("Supplier:N", legend=alt.Legend(title="Supplier")),
-            tooltip=[alt.Tooltip("Supplier:N"), alt.Tooltip("EstCost:Q", format="$.0f")]
-        ).properties(title="Top Suppliers in Purchase Plan (by Estimated Cost)")
-        st.altair_chart(pie, use_container_width=True)
+    with tab3:
+        st.subheader("🛒 Usage-Based Parent Purchase Plan with Delivery Intelligence")
+    
+        # ADD THIS LINE:
+        desired_woh = st.slider("Desired Weeks On Hand (WOH) for Parent Purchase Plan", 0.0, 12.0, 4.0, 0.5)
+    
+        # --- Filters (Supplier and Protein) ---
+        all_suppliers = sorted(sku_stats["Supplier"].dropna().unique())
+        all_proteins = sorted(sku_stats["Protein"].dropna().unique())
+        selected_supplier = st.selectbox("Supplier Filter", ["All"] + all_suppliers)
+        selected_protein = st.selectbox("Protein Filter", ["All"] + all_proteins)
+    
+        # --- Parent Purchase Plan Aggregation ---
+        child_to_parent = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
+        parent_desc_map = dict(zip(prod_detail['ParentSKU'], prod_detail['Description'].fillna("").astype(str)))
+        sku_stats['ParentSKU'] = sku_stats['SKU'].map(child_to_parent).fillna(sku_stats['SKU'])
+        mask = (sku_stats["ParentSKU"].isin(["", "nan", "none", "null"])) | (sku_stats["ParentSKU"].isna())
+        sku_stats.loc[mask, "ParentSKU"] = sku_stats.loc[mask, "SKU"]
+    
+        parent_stats = (
+            sku_stats.groupby("ParentSKU", as_index=False)
+                .agg(
+                    MeanUse=('AvgWeeklyUsage', 'sum'),
+                    InvWt=('OnHandWeightTotal', 'sum'),
+                    InvCost=('OnHandCostTotal', 'sum'),
+                    Supplier=('Supplier', lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0]),
+                    Protein=('Protein', lambda x: x.mode()[0] if not x.mode().empty else ""),
+                )
+        )
+        parent_stats['DesiredWt'] = parent_stats['MeanUse'] * desired_woh
+        parent_stats['ToBuyWt'] = (parent_stats['DesiredWt'] - parent_stats['InvWt']).clip(lower=0)
+        packsize_map = sku_stats.groupby('ParentSKU')['PackSize'].median()
+        global_packsize = sku_stats['PackSize'].dropna().mean()
+        parent_stats['PackSize'] = parent_stats['ParentSKU'].map(packsize_map).fillna(global_packsize if not np.isnan(global_packsize) else 1.0)
+        parent_stats['PacksToOrder'] = np.where(
+            parent_stats['PackSize'] > 0, np.ceil(parent_stats['ToBuyWt'] / parent_stats['PackSize']), 0
+        ).astype(int)
+        parent_stats['OrderWt'] = parent_stats['PacksToOrder'] * parent_stats['PackSize']
+        parent_stats['SKU'] = parent_stats['ParentSKU']
+        parent_stats['SKU_Desc'] = parent_stats['SKU'].map(parent_desc_map).fillna(parent_stats['SKU'])
+        parent_stats['CostPerLb'] = np.where(
+            parent_stats['InvWt'] > 0,
+            parent_stats['InvCost'] / parent_stats['InvWt'],
+            0
+        )
+        parent_stats['EstCost'] = parent_stats['OrderWt'] * parent_stats['CostPerLb']
+    
+        # Filter out parents with no packs to order
+        plan_df = parent_stats[parent_stats['PacksToOrder'] > 0].copy()
+        plan_df["SpecialOrderFlag"] = plan_df["SKU"].str.contains("SO01", na=False) | plan_df["SKU_Desc"].str.contains("SO01", na=False)
+        plan_df["SO Note"] = np.where(plan_df["SpecialOrderFlag"], "SO01 Special Order", "")
+    
+        # --- Delivery Info ---
+        delivery_info = plan_df["Supplier"].apply(lambda s: get_next_delivery(s))
+        plan_df["NextCutoff"] = delivery_info.apply(lambda d: d["cutoff_datetime"].strftime("%a %H:%M") if d["found"] else "")
+        plan_df["NextDelivery"] = delivery_info.apply(lambda d: d["delivery_date"].strftime("%Y-%m-%d") if d["found"] and d["delivery_date"] else "")
+        plan_df["DeliveryNotes"] = delivery_info.apply(lambda d: d["notes"] if d["found"] else d.get("reason", ""))
+    
+        # --- Filters ---
+        if selected_supplier != "All":
+            plan_df = plan_df[plan_df["Supplier"] == selected_supplier]
+        if selected_protein != "All":
+            plan_df = plan_df[plan_df["Protein"] == selected_protein]
+    
+        display_cols = [
+            "SKU", "SKU_Desc", "Supplier", "Protein", "InvWt", "DesiredWt",
+            "PackSize", "PacksToOrder", "OrderWt", "EstCost",
+            "SO Note", "NextCutoff", "NextDelivery", "DeliveryNotes"
+        ]
+        display = plan_df[display_cols].copy()
+        display["InvWt"] = display["InvWt"].map("{:,.0f} lb".format)
+        display["DesiredWt"] = display["DesiredWt"].map("{:,.0f} lb".format)
+        display["PackSize"] = display["PackSize"].map("{:,.0f} lb".format)
+        display["OrderWt"] = display["OrderWt"].map("{:,.0f} lb".format)
+        display["EstCost"] = display["EstCost"].map("${:,.2f}".format)
+    
+        st.dataframe(display, use_container_width=True)
+    
+        buf = io.BytesIO()
+        display.to_excel(buf, index=False, sheet_name="PurchasePlan")
+        buf.seek(0)
+        st.download_button("📥 Download Purchase Plan", data=buf.getvalue(), file_name="Purchase_Plan.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
+        supplier_summary = (
+            plan_df.groupby("Supplier", as_index=False)["EstCost"].sum()
+            .sort_values("EstCost", ascending=False)
+            .head(10)
+        )
+        if not supplier_summary.empty:
+            pie = alt.Chart(supplier_summary).mark_arc(innerRadius=50).encode(
+                theta=alt.Theta(field="EstCost", type="quantitative", stack=True),
+                color=alt.Color("Supplier:N", legend=alt.Legend(title="Supplier")),
+                tooltip=[alt.Tooltip("Supplier:N"), alt.Tooltip("EstCost:Q", format="$.0f")]
+            ).properties(title="Top Suppliers in Purchase Plan (by Estimated Cost)")
+            st.altair_chart(pie, use_container_width=True)
