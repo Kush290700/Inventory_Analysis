@@ -310,7 +310,7 @@ def compute_parent_purchase_plan(sku_stats, prod_detail, cost_val, desired_woh):
     ].copy()
     plan.reset_index(drop=True, inplace=True)
     return plan
-def advanced_purchase_plan_tab(sku_stats, prod_detail, cost_val, desired_woh=4.0):
+
 # ------------------- MAIN STREAMLIT TAB ------------------- #
 
 def woh_tab(sheets, theme):
