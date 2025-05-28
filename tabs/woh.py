@@ -438,89 +438,88 @@ def woh_tab(sheets, theme):
             ).properties(height=alt.Step(25))
             st.altair_chart(theme(chart2).interactive(), use_container_width=True)
 
-with tab3:
-    st.subheader("🛒 Usage-Based Parent Purchase Plan with Delivery Intelligence")
-
-    # --- Desired Weeks-On-Hand (WOH) Slider ---
-    desired_woh = st.slider("Desired Weeks On Hand (WOH) for Parent Purchase Plan", 0.0, 12.0, 4.0, 0.5)
-
-    # --- Preprocess Parent Chains and Descriptions ---
-    parent_plan = preprocess_for_parents(sku_stats, prod_detail)
-
-    # --- Calculate Purchase Plan Fields ---
-    parent_plan['DesiredWt'] = parent_plan['MeanUse'] * desired_woh
-    parent_plan['ToBuyWt'] = (parent_plan['DesiredWt'] - parent_plan['InvWt']).clip(lower=0)
-
-    # Calculate pack size (use median from all SKUs mapping to this parent)
-    packsize_map = sku_stats.groupby('TrueParent')['PackSize'].median()
-    global_packsize = sku_stats['PackSize'].dropna().mean()
-    parent_plan['PackSize'] = parent_plan['SKU'].map(packsize_map).fillna(global_packsize if not np.isnan(global_packsize) else 1.0)
-
-    parent_plan['PacksToOrder'] = np.where(
-        parent_plan['PackSize'] > 0, np.ceil(parent_plan['ToBuyWt'] / parent_plan['PackSize']), 0
-    ).astype(int)
-    parent_plan['OrderWt'] = parent_plan['PacksToOrder'] * parent_plan['PackSize']
-
-    parent_plan['CostPerLb'] = np.where(
-        parent_plan['InvWt'] > 0,
-        parent_plan['InvCost'] / parent_plan['InvWt'],
-        0
-    )
-    parent_plan['EstCost'] = parent_plan['OrderWt'] * parent_plan['CostPerLb']
-
-    # --- Special Order SO01 Flag ---
-    parent_plan["SpecialOrderFlag"] = parent_plan["SKU"].astype(str).str.contains("SO01", na=False) | parent_plan["SKU_Desc"].astype(str).str.contains("SO01", na=False)
-    parent_plan["SO Note"] = np.where(parent_plan["SpecialOrderFlag"], "SO01 Special Order", "")
-
-    # --- Delivery Info ---
-    delivery_info = parent_plan["Supplier"].apply(lambda s: get_next_delivery(s))
-    parent_plan["NextCutoff"] = delivery_info.apply(lambda d: d["cutoff_datetime"].strftime("%a %H:%M") if d["found"] else "")
-    parent_plan["NextDelivery"] = delivery_info.apply(lambda d: d["delivery_date"].strftime("%Y-%m-%d") if d["found"] and d["delivery_date"] else "")
-    parent_plan["DeliveryNotes"] = delivery_info.apply(lambda d: d["notes"] if d["found"] else d.get("reason", ""))
-
-    # --- Filters (Supplier/Protein) ---
-    all_suppliers = sorted(parent_plan["Supplier"].dropna().unique())
-    all_proteins = sorted(parent_plan["Protein"].dropna().unique())
-    selected_supplier = st.selectbox("Supplier Filter", ["All"] + all_suppliers)
-    selected_protein = st.selectbox("Protein Filter", ["All"] + all_proteins)
-    plan_df = parent_plan.copy()
-    if selected_supplier != "All":
-        plan_df = plan_df[plan_df["Supplier"] == selected_supplier]
-    if selected_protein != "All":
-        plan_df = plan_df[plan_df["Protein"] == selected_protein]
-
-    # --- Only show those with packs to order
-    plan_df = plan_df[plan_df['PacksToOrder'] > 0]
-
-    display_cols = [
-        "SKU", "SKU_Desc", "Supplier", "Protein", "InvWt", "DesiredWt",
-        "PackSize", "PacksToOrder", "OrderWt", "EstCost",
-        "SO Note", "NextCutoff", "NextDelivery", "DeliveryNotes"
-    ]
-    display = plan_df[display_cols].copy()
-    display["InvWt"] = display["InvWt"].map("{:,.0f} lb".format)
-    display["DesiredWt"] = display["DesiredWt"].map("{:,.0f} lb".format)
-    display["PackSize"] = display["PackSize"].map("{:,.0f} lb".format)
-    display["OrderWt"] = display["OrderWt"].map("{:,.0f} lb".format)
-    display["EstCost"] = display["EstCost"].map("${:,.2f}".format)
-
-    st.dataframe(display, use_container_width=True)
-
-    buf = io.BytesIO()
-    display.to_excel(buf, index=False, sheet_name="PurchasePlan")
-    buf.seek(0)
-    st.download_button("📥 Download Purchase Plan", data=buf.getvalue(), file_name="Purchase_Plan.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    supplier_summary = (
-        plan_df.groupby("Supplier", as_index=False)["EstCost"].sum()
-        .sort_values("EstCost", ascending=False)
-        .head(10)
-    )
-    if not supplier_summary.empty:
-        pie = alt.Chart(supplier_summary).mark_arc(innerRadius=50).encode(
-            theta=alt.Theta(field="EstCost", type="quantitative", stack=True),
-            color=alt.Color("Supplier:N", legend=alt.Legend(title="Supplier")),
-            tooltip=[alt.Tooltip("Supplier:N"), alt.Tooltip("EstCost:Q", format="$.0f")]
-        ).properties(title="Top Suppliers in Purchase Plan (by Estimated Cost)")
-        st.altair_chart(pie, use_container_width=True)
-
+    with tab3:
+        st.subheader("🛒 Usage-Based Parent Purchase Plan with Delivery Intelligence")
+    
+        # --- Desired Weeks-On-Hand (WOH) Slider ---
+        desired_woh = st.slider("Desired Weeks On Hand (WOH) for Parent Purchase Plan", 0.0, 12.0, 4.0, 0.5)
+    
+        # --- Preprocess Parent Chains and Descriptions ---
+        parent_plan = preprocess_for_parents(sku_stats, prod_detail)
+    
+        # --- Calculate Purchase Plan Fields ---
+        parent_plan['DesiredWt'] = parent_plan['MeanUse'] * desired_woh
+        parent_plan['ToBuyWt'] = (parent_plan['DesiredWt'] - parent_plan['InvWt']).clip(lower=0)
+    
+        # Calculate pack size (use median from all SKUs mapping to this parent)
+        packsize_map = sku_stats.groupby('TrueParent')['PackSize'].median()
+        global_packsize = sku_stats['PackSize'].dropna().mean()
+        parent_plan['PackSize'] = parent_plan['SKU'].map(packsize_map).fillna(global_packsize if not np.isnan(global_packsize) else 1.0)
+    
+        parent_plan['PacksToOrder'] = np.where(
+            parent_plan['PackSize'] > 0, np.ceil(parent_plan['ToBuyWt'] / parent_plan['PackSize']), 0
+        ).astype(int)
+        parent_plan['OrderWt'] = parent_plan['PacksToOrder'] * parent_plan['PackSize']
+    
+        parent_plan['CostPerLb'] = np.where(
+            parent_plan['InvWt'] > 0,
+            parent_plan['InvCost'] / parent_plan['InvWt'],
+            0
+        )
+        parent_plan['EstCost'] = parent_plan['OrderWt'] * parent_plan['CostPerLb']
+    
+        # --- Special Order SO01 Flag ---
+        parent_plan["SpecialOrderFlag"] = parent_plan["SKU"].astype(str).str.contains("SO01", na=False) | parent_plan["SKU_Desc"].astype(str).str.contains("SO01", na=False)
+        parent_plan["SO Note"] = np.where(parent_plan["SpecialOrderFlag"], "SO01 Special Order", "")
+    
+        # --- Delivery Info ---
+        delivery_info = parent_plan["Supplier"].apply(lambda s: get_next_delivery(s))
+        parent_plan["NextCutoff"] = delivery_info.apply(lambda d: d["cutoff_datetime"].strftime("%a %H:%M") if d["found"] else "")
+        parent_plan["NextDelivery"] = delivery_info.apply(lambda d: d["delivery_date"].strftime("%Y-%m-%d") if d["found"] and d["delivery_date"] else "")
+        parent_plan["DeliveryNotes"] = delivery_info.apply(lambda d: d["notes"] if d["found"] else d.get("reason", ""))
+    
+        # --- Filters (Supplier/Protein) ---
+        all_suppliers = sorted(parent_plan["Supplier"].dropna().unique())
+        all_proteins = sorted(parent_plan["Protein"].dropna().unique())
+        selected_supplier = st.selectbox("Supplier Filter", ["All"] + all_suppliers)
+        selected_protein = st.selectbox("Protein Filter", ["All"] + all_proteins)
+        plan_df = parent_plan.copy()
+        if selected_supplier != "All":
+            plan_df = plan_df[plan_df["Supplier"] == selected_supplier]
+        if selected_protein != "All":
+            plan_df = plan_df[plan_df["Protein"] == selected_protein]
+    
+        # --- Only show those with packs to order
+        plan_df = plan_df[plan_df['PacksToOrder'] > 0]
+    
+        display_cols = [
+            "SKU", "SKU_Desc", "Supplier", "Protein", "InvWt", "DesiredWt",
+            "PackSize", "PacksToOrder", "OrderWt", "EstCost",
+            "SO Note", "NextCutoff", "NextDelivery", "DeliveryNotes"
+        ]
+        display = plan_df[display_cols].copy()
+        display["InvWt"] = display["InvWt"].map("{:,.0f} lb".format)
+        display["DesiredWt"] = display["DesiredWt"].map("{:,.0f} lb".format)
+        display["PackSize"] = display["PackSize"].map("{:,.0f} lb".format)
+        display["OrderWt"] = display["OrderWt"].map("{:,.0f} lb".format)
+        display["EstCost"] = display["EstCost"].map("${:,.2f}".format)
+    
+        st.dataframe(display, use_container_width=True)
+    
+        buf = io.BytesIO()
+        display.to_excel(buf, index=False, sheet_name="PurchasePlan")
+        buf.seek(0)
+        st.download_button("📥 Download Purchase Plan", data=buf.getvalue(), file_name="Purchase_Plan.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
+        supplier_summary = (
+            plan_df.groupby("Supplier", as_index=False)["EstCost"].sum()
+            .sort_values("EstCost", ascending=False)
+            .head(10)
+        )
+        if not supplier_summary.empty:
+            pie = alt.Chart(supplier_summary).mark_arc(innerRadius=50).encode(
+                theta=alt.Theta(field="EstCost", type="quantitative", stack=True),
+                color=alt.Color("Supplier:N", legend=alt.Legend(title="Supplier")),
+                tooltip=[alt.Tooltip("Supplier:N"), alt.Tooltip("EstCost:Q", format="$.0f")]
+            ).properties(title="Top Suppliers in Purchase Plan (by Estimated Cost)")
+            st.altair_chart(pie, use_container_width=True)
