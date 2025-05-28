@@ -18,7 +18,9 @@ from utils.aggregation    import (
     aggregate_final_data,
 )
 from utils.costing        import compute_holding_cost
-from tabs import kpis, woh_tab, movers, holding_cost, insights, bin_scan
+
+from tabs import kpis, woh, movers, holding_cost, insights, bin_scan
+from tabs.woh_tab_advanced import woh_tab   # <-- Import your new tab here!
 
 def apply_theme(chart):
     return (
@@ -26,6 +28,8 @@ def apply_theme(chart):
         .configure_axis(labelFontSize=12, titleFontSize=14)
         .configure_legend(labelFontSize=12, titleFontSize=14)
     )
+
+theme = apply_theme  # alias for passing to tabs
 
 st.set_page_config(page_title="⚙️ Advanced Inventory Dashboard", layout="wide")
 
@@ -35,25 +39,19 @@ st.set_page_config(page_title="⚙️ Advanced Inventory Dashboard", layout="wid
 uploaded = st.sidebar.file_uploader("Upload master .xlsx", type="xlsx", key="uploader")
 
 if uploaded is not None:
-    # delete old temp file if exists
     old_path = st.session_state.get("saved_file_path")
     if old_path and os.path.exists(old_path):
         try:
             os.remove(old_path)
         except Exception:
             pass
-
-    # write new file to a unique temp path
     tmp_dir   = tempfile.gettempdir()
     filename  = f"inventory_{uuid.uuid4().hex}.xlsx"
     tmp_path  = os.path.join(tmp_dir, filename)
-
     with open(tmp_path, "wb") as f:
         f.write(uploaded.getbuffer())
-
     st.session_state["saved_file_path"] = tmp_path
 
-# if nothing ever uploaded, halt
 if "saved_file_path" not in st.session_state:
     st.sidebar.warning("Please upload your master .xlsx to begin.")
     st.stop()
@@ -88,7 +86,6 @@ def load_everything_from_path(path: str):
     # RETURN the sheets dict, too
     return df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df, sheets
 
-# unpack 8 values now, including sheets
 df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df, sheets = (
     load_everything_from_path(st.session_state["saved_file_path"])
 )
@@ -96,7 +93,6 @@ df_woh, df_hc, sales_df, inv1_df, mikuni_df, cost_df, prod_df, sheets = (
 # -----------------------------------------------------------------------------
 # 3) Merge Protein (with fall-back) + Filters + Tabs
 # -----------------------------------------------------------------------------
-# ensure typings
 prod_df["SKU"] = prod_df["SKU"].astype(str)
 df_woh["SKU"] = df_woh["SKU"].astype(str)
 
@@ -133,8 +129,7 @@ if section == "📈 KPIs":
     kpis.render(df, df_hc, apply_theme)
 
 elif section == "📊 WOH":
-    # pass sheets along so tab can pull "Product Detail"
-    woh_tab(sheets, theme)
+    woh_tab(sheets, theme)   # <<-- Use your new advanced tab here!
 
 elif section == "🚀 Movers":
     movers.render(df, apply_theme)
