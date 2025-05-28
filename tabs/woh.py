@@ -143,7 +143,7 @@ def aggregate_data(sheets, weeks_override=None):
     # Production
     prod_df['SKU'] = prod_df['SKU'].map(clean_sku)
     if 'ProductionShippedLb' in prod_df:
-        prod_df['ProductionShippedLb'] = pd.to_numeric(prod_df['ProductionShippedLb'], errors='coerce').fillna(0.0)
+        prod_df['ProductionShippedLb'] = pd.to_numeric(prod_df['WeightLb'], errors='coerce').fillna(0.0)
     else:
         prod_df['ProductionShippedLb'] = pd.to_numeric(prod_df.get('WeightLb', 0), errors='coerce').fillna(0.0)
 
