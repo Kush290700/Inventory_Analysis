@@ -18,7 +18,7 @@ from utils.aggregation    import (
     aggregate_final_data,
 )
 from utils.costing        import compute_holding_cost
-from tabs import kpis, woh, movers, holding_cost, insights, bin_scan
+from tabs import kpis, woh_tab, movers, holding_cost, insights, bin_scan
 
 def apply_theme(chart):
     return (
@@ -134,7 +134,7 @@ if section == "📈 KPIs":
 
 elif section == "📊 WOH":
     # pass sheets along so tab can pull "Product Detail"
-    woh.render(sheets, theme)
+    woh_tab(sheets, theme)
 
 elif section == "🚀 Movers":
     movers.render(df, apply_theme)
