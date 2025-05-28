@@ -374,7 +374,12 @@ def woh_tab(sheets, theme):
     sku_stats, prod_detail, cost_val = aggregate_data(sheets)
 
     # Tabs for each workflow
-    tab1, tab2, tab3 = st.tabs(["FZ → EXT Transfer", "EXT → FZ Transfer", "Parent Purchase Plan"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+    "FZ → EXT Transfer",
+    "EXT → FZ Transfer",
+    "Purchase Plan",
+    "Product Lookup"  # <-- New tab
+    ])
 
     # --- FZ → EXT Transfer ---
     with tab1:
@@ -564,3 +569,33 @@ def woh_tab(sheets, theme):
                 tooltip=[alt.Tooltip("Supplier:N"), alt.Tooltip("EstCost:Q", format="$.0f")]
             ).properties(title="Top Suppliers in Purchase Plan (by Estimated Cost)")
             st.altair_chart(pie, use_container_width=True)
+
+    with tab4:
+        st.subheader("🔍 Product Lookup: Usage & Weeks-On-Hand")
+    
+        # Combine SKU and Description for easy search
+        sku_stats["SearchKey"] = sku_stats["SKU"].astype(str) + " – " + sku_stats["SKU_Desc"].fillna("")
+    
+        # Search input
+        query = st.text_input("Enter SKU, Product Name, or Partial Description:")
+        if query:
+            mask = sku_stats["SearchKey"].str.contains(query, case=False, na=False) | \
+                   sku_stats["SKU"].astype(str).str.contains(query, case=False, na=False)
+            results = sku_stats[mask]
+            if not results.empty:
+                show_cols = [
+                    "SKU", "SKU_Desc", "Supplier", "Protein", "AvgWeeklyUsage", "OnHandWeightTotal",
+                    "WeeksOnHand", "ProductState"
+                ]
+                # Nicely format numeric columns
+                results_disp = results[show_cols].copy()
+                results_disp["AvgWeeklyUsage"] = results_disp["AvgWeeklyUsage"].map("{:,.2f} lb".format)
+                results_disp["OnHandWeightTotal"] = results_disp["OnHandWeightTotal"].map("{:,.2f} lb".format)
+                results_disp["WeeksOnHand"] = results_disp["WeeksOnHand"].map("{:,.2f}".format)
+                st.dataframe(results_disp, use_container_width=True)
+            else:
+                st.warning("No products matched your search.")
+        else:
+            st.info("Enter a SKU or product description to search.")
+
+
