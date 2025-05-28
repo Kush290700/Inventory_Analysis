@@ -134,7 +134,7 @@ if section == "📈 KPIs":
 
 elif section == "📊 WOH":
     # pass sheets along so tab can pull "Product Detail"
-    woh_tab(sheets, theme)
+    woh.render(sheets, theme)
 
 elif section == "🚀 Movers":
     movers.render(df, apply_theme)
