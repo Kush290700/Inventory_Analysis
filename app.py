@@ -20,7 +20,7 @@ from utils.aggregation    import (
 from utils.costing        import compute_holding_cost
 
 from tabs import kpis, woh, movers, holding_cost, insights, bin_scan
-from tabs.woh_tab_advanced import woh_tab   # <-- Import your new tab here!
+from tabs.woh import woh_tab   # <-- Import your new tab here!
 
 def apply_theme(chart):
     return (
