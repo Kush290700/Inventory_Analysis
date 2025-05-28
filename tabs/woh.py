@@ -295,27 +295,35 @@ def preprocess_for_parents(sku_stats, prod_detail):
     # Add Description candidate for each SKU
     sku_stats['SKU_Desc'] = sku_stats['SKU'].map(desc_map).fillna(sku_stats['SKU_Desc'])
 
+    # These are always safe
+    agg_dict = {
+        'MeanUse': ('AvgWeeklyUsage', 'sum'),
+        'InvWt': ('OnHandWeightTotal', 'sum'),
+        'InvCost': ('OnHandCostTotal', 'sum'),
+        'Supplier': ('Supplier', lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0]),
+        'Protein': ('Protein', lambda x: x.mode()[0] if not x.mode().empty else ""),
+    }
+
+    # Only add these if the columns exist
+    if 'PacksToOrder' in sku_stats.columns:
+        agg_dict['PacksToOrder'] = ('PacksToOrder', 'sum')
+    if 'OrderWt' in sku_stats.columns:
+        agg_dict['OrderWt'] = ('OrderWt', 'sum')
+    if 'EstCost' in sku_stats.columns:
+        agg_dict['EstCost'] = ('EstCost', 'sum')
+
     # Now group by TrueParent and aggregate everything up
     agg = (
         sku_stats.groupby('TrueParent', as_index=False)
-            .agg(
-                MeanUse=('AvgWeeklyUsage', 'sum'),
-                InvWt=('OnHandWeightTotal', 'sum'),
-                InvCost=('OnHandCostTotal', 'sum'),
-                Supplier=('Supplier', lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0]),
-                Protein=('Protein', lambda x: x.mode()[0] if not x.mode().empty else ""),
-                PacksToOrder=('PacksToOrder', 'sum') if 'PacksToOrder' in sku_stats.columns else (lambda x: 0),
-                OrderWt=('OrderWt', 'sum') if 'OrderWt' in sku_stats.columns else (lambda x: 0),
-                EstCost=('EstCost', 'sum') if 'EstCost' in sku_stats.columns else (lambda x: 0),
-            )
+            .agg(**agg_dict)
     )
+
     # Get the best description for each root parent
     desc_lookup = sku_stats.groupby('TrueParent').apply(get_best_description)
     agg['SKU_Desc'] = agg['TrueParent'].map(desc_lookup)
-
     agg['SKU'] = agg['TrueParent']  # For consistency downstream
     return agg
-
+    
 # ------------------- PARENT PURCHASE PLAN ------------------- #
 
 @st.cache_data(show_spinner=False)
