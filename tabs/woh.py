@@ -379,26 +379,43 @@ def woh_tab(sheets, theme):
     # --- FZ → EXT Transfer ---
     with tab1:
         st.subheader("🔄 Move FZ → EXT")
+        # Filter out only FZ and EXT SKUs with usage
         fz = sku_stats[(sku_stats['ProductState'].str.startswith('FZ')) & (sku_stats['AvgWeeklyUsage'] > 0)].copy()
         ext = sku_stats[(sku_stats['ProductState'].str.startswith('EXT')) & (sku_stats['AvgWeeklyUsage'] > 0)].copy()
+    
         thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 4.0, 1.5, 0.25)
         fz['DesiredFZ_Weight'] = fz['AvgWeeklyUsage'] * thr1
         fz['WeightToMove'] = (fz['OnHandWeightTotal'] - fz['DesiredFZ_Weight']).clip(lower=0)
-        ext_weight_lookup = ext.set_index("SKU")["OnHandWeightTotal"]
-        fz['EXT_Weight'] = fz['SKU'].map(ext_weight_lookup).fillna(0)
-        fz['TotalOnHand'] = fz['OnHandWeightTotal'] + fz['EXT_Weight']
-        move = fz[fz['WeightToMove'] > 0]
+    
+        # Find EXT stock for these SKUs (if exists)
+        ext_onhand = ext.set_index("SKU")["OnHandWeightTotal"].rename("EXT_Weight")
+        fz = fz.join(ext_onhand, on="SKU")
+        fz["EXT_Weight"] = fz["EXT_Weight"].fillna(0)
+        fz["TotalOnHand_FZ_EXT"] = fz["OnHandWeightTotal"] + fz["EXT_Weight"]
+    
+        move = fz[fz["WeightToMove"] > 0].copy()
+    
+        # Cost to move calculation, robust to divide by zero
+        move['PctToMove'] = np.where(move["OnHandWeightTotal"] > 0, move["WeightToMove"] / move["OnHandWeightTotal"], 0)
+        move['CostToMove'] = move['PctToMove'] * move['OnHandCostTotal']
+    
         c1, c2, c3 = st.columns(3)
         c1.metric("SKUs to Move", move["SKU"].nunique())
         c2.metric("Total Weight to Move", f"{move['WeightToMove'].sum():,.0f} lb")
-        c3.metric("Total Cost to Move", f"${((move['WeightToMove'] / move['OnHandWeightTotal']) * move['OnHandCostTotal']).sum():,.0f}")
+        c3.metric("Total Cost to Move", f"${move['CostToMove'].sum():,.0f}")
+    
         # Download
         if not move.empty:
             buf1 = io.BytesIO()
-            move_cols = ['SKU', 'SKU_Desc', 'Supplier', 'ProductState', 'OnHandWeightTotal', 'AvgWeeklyUsage', 'WeeksOnHand', 'DesiredFZ_Weight', 'WeightToMove', 'EXT_Weight', 'TotalOnHand']
+            move_cols = [
+                'SKU', 'SKU_Desc', 'Supplier', 'ProductState', 'OnHandWeightTotal',
+                'AvgWeeklyUsage', 'WeeksOnHand', 'DesiredFZ_Weight', 'WeightToMove',
+                'EXT_Weight', 'TotalOnHand_FZ_EXT', 'OnHandCostTotal', 'CostToMove'
+            ]
             move[move_cols].to_excel(buf1, index=False, sheet_name="FZ2EXT")
             buf1.seek(0)
             st.download_button("Download FZ→EXT List", buf1.getvalue(), file_name="FZ2EXT_list.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
         # Chart
         if not move.empty:
             chart = alt.Chart(move).mark_bar().encode(
@@ -408,34 +425,50 @@ def woh_tab(sheets, theme):
                 tooltip=["SKU_Desc", "Supplier", "WeightToMove", "WeeksOnHand"]
             ).properties(height=alt.Step(25))
             st.altair_chart(theme(chart).interactive(), use_container_width=True)
-
+    
     # --- EXT → FZ Transfer ---
     with tab2:
         st.subheader("🔄 Move EXT → FZ")
-        fz_woh = sku_stats[sku_stats['ProductState'].str.startswith('FZ')].set_index('SKU')['WeeksOnHand']
+        fz = sku_stats[(sku_stats['ProductState'].str.startswith('FZ')) & (sku_stats['AvgWeeklyUsage'] > 0)].copy()
         ext = sku_stats[(sku_stats['ProductState'].str.startswith('EXT')) & (sku_stats['AvgWeeklyUsage'] > 0)].copy()
+    
+        # Build lookup of FZ inventory for EXT SKUs
+        fz_onhand = fz.set_index("SKU")["OnHandWeightTotal"].rename("FZ_Weight")
+        ext = ext.join(fz_onhand, on="SKU")
+        ext["FZ_Weight"] = ext["FZ_Weight"].fillna(0)
+    
         thr2_default = 1.0
         try:
             thr2_default = float(compute_threshold_move(ext, None))
         except Exception:
             pass
-        thr2 = st.slider("Desired FZ WOH to achieve", 0.0, float(fz_woh.max() if not fz_woh.empty else 52.0), thr2_default, step=0.25)
-        ext['FZ_Weight'] = ext['SKU'].map(fz_woh).fillna(0)
-        ext['DesiredFZ_Weight'] = ext['AvgWeeklyUsage'] * thr2
-        ext['WeightToReturn'] = ext['DesiredFZ_Weight'].sub(ext['FZ_Weight']).clip(lower=0)
-        ext['TotalOnHand'] = ext['OnHandWeightTotal'] + ext['FZ_Weight']
-        back = ext[ext['WeightToReturn'] > 0]
+        thr2 = st.slider("Desired FZ WOH to achieve", 0.0, float(fz["WeeksOnHand"].max() if not fz.empty else 52.0), thr2_default, step=0.25)
+    
+        ext["DesiredFZ_Weight"] = ext["AvgWeeklyUsage"] * thr2
+        ext["WeightToReturn"] = (ext["DesiredFZ_Weight"] - ext["FZ_Weight"]).clip(lower=0)
+        ext["TotalOnHand_EXT_FZ"] = ext["OnHandWeightTotal"] + ext["FZ_Weight"]
+    
+        back = ext[ext["WeightToReturn"] > 0].copy()
+        back['PctToReturn'] = np.where(back["OnHandWeightTotal"] > 0, back["WeightToReturn"] / back["OnHandWeightTotal"], 0)
+        back['CostToReturn'] = back['PctToReturn'] * back['OnHandCostTotal']
+    
         col1, col2, col3 = st.columns(3)
         col1.metric("SKUs to Return", back["SKU"].nunique())
         col2.metric("Total Weight to Return", f"{back['WeightToReturn'].sum():,.0f} lb")
-        col3.metric("Total Cost to Return", f"${((back['WeightToReturn'] / back['OnHandWeightTotal']) * back['OnHandCostTotal']).sum():,.0f}")
+        col3.metric("Total Cost to Return", f"${back['CostToReturn'].sum():,.0f}")
+    
         # Download
         if not back.empty:
             buf2 = io.BytesIO()
-            back_cols = ['SKU', 'SKU_Desc', 'Supplier', 'ProductState', 'OnHandWeightTotal', 'AvgWeeklyUsage', 'WeeksOnHand', 'DesiredFZ_Weight', 'WeightToReturn', 'FZ_Weight', 'TotalOnHand']
+            back_cols = [
+                'SKU', 'SKU_Desc', 'Supplier', 'ProductState', 'OnHandWeightTotal',
+                'AvgWeeklyUsage', 'WeeksOnHand', 'DesiredFZ_Weight', 'WeightToReturn',
+                'FZ_Weight', 'TotalOnHand_EXT_FZ', 'OnHandCostTotal', 'CostToReturn'
+            ]
             back[back_cols].to_excel(buf2, index=False, sheet_name="EXT2FZ")
             buf2.seek(0)
             st.download_button("Download EXT→FZ List", buf2.getvalue(), file_name="EXT2FZ_list.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
         # Chart
         if not back.empty:
             chart2 = alt.Chart(back).mark_bar().encode(
@@ -445,7 +478,7 @@ def woh_tab(sheets, theme):
                 tooltip=["SKU_Desc", "Supplier", "WeightToReturn", "WeeksOnHand"]
             ).properties(height=alt.Step(25))
             st.altair_chart(theme(chart2).interactive(), use_container_width=True)
-
+        
     with tab3:
         st.subheader("🛒 Usage-Based Product Purchase Plan with Delivery Intelligence")
     
