@@ -571,31 +571,78 @@ def woh_tab(sheets, theme):
             st.altair_chart(pie, use_container_width=True)
 
     with tab4:
-        st.subheader("🔍 Product Lookup: Usage & Weeks-On-Hand")
+        st.subheader("🔍 Product Lookup: Parent + Children Usage & WOH")
     
-        # Combine SKU and Description for easy search
+        # Parent/Child maps
+        parent_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
+        desc_map = dict(zip(prod_detail['SKU'], prod_detail['SKU_Desc']))
+    
+        # Function to walk up the chain
+        def get_root_parent(sku):
+            seen = set()
+            while sku in parent_map and pd.notnull(parent_map[sku]) and parent_map[sku] != "" and parent_map[sku] != sku:
+                if sku in seen:
+                    break
+                seen.add(sku)
+                sku = parent_map[sku]
+            return sku
+    
         sku_stats["SearchKey"] = sku_stats["SKU"].astype(str) + " – " + sku_stats["SKU_Desc"].fillna("")
-    
-        # Search input
         query = st.text_input("Enter SKU, Product Name, or Partial Description:")
+    
         if query:
+            # Find all matching SKUs/descriptions
             mask = sku_stats["SearchKey"].str.contains(query, case=False, na=False) | \
                    sku_stats["SKU"].astype(str).str.contains(query, case=False, na=False)
-            results = sku_stats[mask]
-            if not results.empty:
-                show_cols = [
-                    "SKU", "SKU_Desc", "Supplier", "Protein", "AvgWeeklyUsage", "OnHandWeightTotal",
-                    "WeeksOnHand", "ProductState"
-                ]
-                # Nicely format numeric columns
-                results_disp = results[show_cols].copy()
-                results_disp["AvgWeeklyUsage"] = results_disp["AvgWeeklyUsage"].map("{:,.2f} lb".format)
-                results_disp["OnHandWeightTotal"] = results_disp["OnHandWeightTotal"].map("{:,.2f} lb".format)
-                results_disp["WeeksOnHand"] = results_disp["WeeksOnHand"].map("{:,.2f}".format)
-                st.dataframe(results_disp, use_container_width=True)
-            else:
+            matched = sku_stats[mask]
+    
+            if matched.empty:
                 st.warning("No products matched your search.")
+            else:
+                # For each match, get the root parent and show rollup + all children
+                # (Usually there's one match, but could be multiple, so iterate)
+                for idx, row in matched.iterrows():
+                    search_sku = row['SKU']
+                    root_parent = get_root_parent(search_sku)
+                    # Find all child SKUs under this parent (including parent itself)
+                    child_mask = sku_stats['SKU'].apply(lambda x: get_root_parent(x) == root_parent)
+                    fam = sku_stats[child_mask].copy()
+    
+                    # Roll up family totals
+                    fam_totals = fam.agg({
+                        'AvgWeeklyUsage': 'sum',
+                        'OnHandWeightTotal': 'sum'
+                    })
+                    fam_totals['WeeksOnHand'] = fam_totals['OnHandWeightTotal'] / fam_totals['AvgWeeklyUsage'] if fam_totals['AvgWeeklyUsage'] > 0 else float('nan')
+    
+                    parent_desc = fam[fam['SKU'] == root_parent]['SKU_Desc'].iloc[0] if not fam[fam['SKU'] == root_parent].empty else ""
+                    st.markdown(f"**Parent Product:** `{root_parent}` – {parent_desc}")
+                    st.markdown(f"- **Total Usage (lb/wk):** `{fam_totals['AvgWeeklyUsage']:.2f}`")
+                    st.markdown(f"- **Total On Hand (lb):** `{fam_totals['OnHandWeightTotal']:.2f}`")
+                    st.markdown(f"- **Combined Weeks On Hand:** `{fam_totals['WeeksOnHand']:.2f}`")
+    
+                    # Table of all children (and parent itself)
+                    display_cols = [
+                        "SKU", "SKU_Desc", "Supplier", "Protein", "AvgWeeklyUsage",
+                        "OnHandWeightTotal", "WeeksOnHand", "ProductState"
+                    ]
+                    fam_disp = fam[display_cols].copy()
+                    fam_disp["AvgWeeklyUsage"] = fam_disp["AvgWeeklyUsage"].map("{:,.2f} lb".format)
+                    fam_disp["OnHandWeightTotal"] = fam_disp["OnHandWeightTotal"].map("{:,.2f} lb".format)
+                    fam_disp["WeeksOnHand"] = fam_disp["WeeksOnHand"].map("{:,.2f}".format)
+                    st.write("**Breakdown by Child SKU:**")
+                    st.dataframe(fam_disp, use_container_width=True)
+    
+                    # Optional: Download
+                    buf = io.BytesIO()
+                    fam_disp.to_excel(buf, index=False, sheet_name="Lookup")
+                    buf.seek(0)
+                    st.download_button(
+                        f"Download Breakdown for {root_parent}",
+                        buf.getvalue(),
+                        file_name=f"{root_parent}_lookup.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    break  # Only show first match for now; remove this if you want all matches
         else:
             st.info("Enter a SKU or product description to search.")
-
-
