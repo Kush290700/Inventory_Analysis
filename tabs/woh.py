@@ -447,10 +447,10 @@ def woh_tab(sheets, theme):
             st.altair_chart(theme(chart2).interactive(), use_container_width=True)
 
     with tab3:
-        st.subheader("🛒 Usage-Based Parent Purchase Plan with Delivery Intelligence")
+        st.subheader("🛒 Usage-Based Product Purchase Plan with Delivery Intelligence")
     
         # --- Desired Weeks-On-Hand (WOH) Slider ---
-        desired_woh = st.slider("Desired Weeks On Hand (WOH) for Parent Purchase Plan", 0.0, 12.0, 4.0, 0.5)
+        desired_woh = st.slider("Desired Weeks On Hand (WOH) for Product Purchase Plan", 0.0, 12.0, 4.0, 0.5)
     
         # --- Preprocess Parent Chains and Descriptions ---
         parent_plan = preprocess_for_parents(sku_stats, prod_detail)
