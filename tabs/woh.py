@@ -17,13 +17,13 @@ def compute_parent_purchase_plan(
     desired_woh: float
 ) -> pd.DataFrame:
     """
-    Returns a parent-level purchase plan based on desired weeks-on-hand (WOH).
+    Compute parent-level purchase plan with accurate pack size from Cost Value.
     """
-    # 1. Input validation
+    # --- Validation ---
     required_cols = {
         'df_inv': ['SKU', 'AvgWeeklyUsage', 'OnHandWeightTotal', 'OnHandCostTotal', 'SKU_Desc'],
         'pd_detail': ['Product Code', 'Velocity Parent', 'Description'],
-        'cost_df': ['SKU']
+        'cost_df': ['SKU', 'WeightLb', 'NumPacks']
     }
     for df_name, cols in required_cols.items():
         df = locals()[df_name]
@@ -37,10 +37,14 @@ def compute_parent_purchase_plan(
             st.error(f"Missing columns in {df_name}: {missing_cols}")
             return pd.DataFrame()
 
-    # 2. Prepare product details
+    # --- Product Detail ---
     d = pd_detail.copy()
     d.columns = [str(c).strip() for c in d.columns]
-    d = d.rename(columns={"Product Code": "SKU", "Velocity Parent": "ParentSKU", "Description": "ParentDesc"})
+    d = d.rename(columns={
+        "Product Code": "SKU",
+        "Velocity Parent": "ParentSKU",
+        "Description": "ParentDesc"
+    })
     for col in ["SKU", "ParentSKU", "ParentDesc"]:
         d[col] = d.get(col, "").fillna("").astype(str).str.strip()
     mask = (d["ParentSKU"].str.lower().isin(["", "nan", "none", "null"])) | (d["ParentSKU"].isna())
@@ -48,13 +52,34 @@ def compute_parent_purchase_plan(
     child_to_parent = dict(zip(d["SKU"], d["ParentSKU"]))
     parent_desc_map = dict(zip(d["ParentSKU"], d["ParentDesc"]))
 
-    # 3. Inventory mapping
+    # --- Inventory Data ---
     inv = df_inv.copy()
     inv["SKU"] = inv["SKU"].astype(str).str.strip()
     inv["SKU_Desc"] = inv["SKU_Desc"].astype(str).str.strip()
     inv["ParentSKU"] = inv["SKU"].map(child_to_parent).fillna(inv["SKU"])
 
-    # 4. Parent supplier mapping (most frequent child supplier or fallback)
+    # --- PackSize calculation: WeightLb / NumPacks per SKU ---
+    cost_df = cost_df.copy()
+    cost_df["SKU"] = cost_df["SKU"].astype(str).str.strip()
+    cost_df["WeightLb"] = pd.to_numeric(cost_df["WeightLb"], errors="coerce")
+    cost_df["NumPacks"] = pd.to_numeric(cost_df["NumPacks"], errors="coerce")
+    cost_df["PackSize"] = np.where(
+        cost_df["NumPacks"] > 0,
+        cost_df["WeightLb"] / cost_df["NumPacks"],
+        np.nan
+    )
+    sku_packsize_map = cost_df.set_index("SKU")["PackSize"].to_dict()
+    inv["PackSize"] = inv["SKU"].map(sku_packsize_map)
+
+    # Parent-level pack size = median of all available child pack sizes
+    parent_packsize = (
+        inv.groupby("ParentSKU")["PackSize"]
+        .median()
+        .replace(0, np.nan)
+        .to_dict()
+    )
+
+    # --- Supplier mapping ---
     supplier_map = {}
     if "Supplier" in inv.columns:
         supplier_map = (
@@ -63,43 +88,26 @@ def compute_parent_purchase_plan(
             .to_dict()
         )
 
-    # 5. Aggregate to parent SKU
+    # --- Aggregate to parent ---
     parent_stats = (
         inv.groupby("ParentSKU", as_index=False)
             .agg(
                 MeanUse=("AvgWeeklyUsage", "sum"),
                 InvWt=("OnHandWeightTotal", "sum"),
-                InvCost=("OnHandCostTotal", "sum"),
+                InvCost=("OnHandCostTotal", "sum")
             )
     )
     parent_stats["DesiredWt"] = parent_stats["MeanUse"] * desired_woh
     parent_stats["ToBuyWt"] = (parent_stats["DesiredWt"] - parent_stats["InvWt"]).clip(lower=0)
-
-    # 6. Pack size/Pack count logic
-    pack_size_map = {}
-    if cost_df is not None and not cost_df.empty:
-        if "PackSize" in cost_df.columns:
-            pack_size_map = pd.Series(
-                pd.to_numeric(cost_df["PackSize"], errors="coerce").fillna(1).values,
-                index=cost_df["SKU"].astype(str)
-            ).to_dict()
-        elif "NumPacks" in cost_df.columns and "SKU" in cost_df.columns:
-            # Fallback: infer from inventory
-            try:
-                avg_pack = inv.groupby("ParentSKU")["OnHandWeightTotal"].sum() / inv.groupby("ParentSKU")["PackCount"].sum()
-                pack_size_map = avg_pack.fillna(1).to_dict()
-            except Exception:
-                pack_size_map = {}
-    # Default to 80 lb/case if unknown
-    parent_stats["PackSize"] = parent_stats["ParentSKU"].map(pack_size_map).fillna(80).astype(float)
-
+    # Use median child pack size, fallback to global mean if missing
+    global_packsize = inv["PackSize"].dropna().mean()
+    parent_stats["PackSize"] = parent_stats["ParentSKU"].map(parent_packsize).fillna(global_packsize if not np.isnan(global_packsize) else 1.0)
     parent_stats["PacksToOrder"] = np.where(
         parent_stats["PackSize"] > 0,
         np.ceil(parent_stats["ToBuyWt"] / parent_stats["PackSize"]),
         0
     ).astype(int)
     parent_stats["OrderWt"] = parent_stats["PacksToOrder"] * parent_stats["PackSize"]
-
     parent_stats["SKU"] = parent_stats["ParentSKU"]
     parent_stats["SKU_Desc"] = parent_stats["SKU"].map(parent_desc_map).fillna(parent_stats["SKU"])
     parent_stats["Supplier"] = parent_stats["SKU"].map(supplier_map).fillna("Unknown")
@@ -110,7 +118,6 @@ def compute_parent_purchase_plan(
     )
     parent_stats["EstCost"] = parent_stats["OrderWt"] * parent_stats["CostPerLb"]
 
-    # --- Only those parents that need to be ordered ---
     plan = parent_stats[parent_stats["PacksToOrder"] > 0][
         ["SKU", "SKU_Desc", "Supplier", "InvWt", "DesiredWt", "PackSize", "PacksToOrder", "OrderWt", "EstCost"]
     ].copy()
@@ -130,7 +137,6 @@ def render(df, df_hc, cost_df, theme, sheets):
         st.error(f"Missing core columns in inventory data: {missing_core}")
         return
     df = df.copy()
-
     # FZ & EXT logic
     state = df["ProductState"].fillna("").str.upper()
     fz = df[(state.str.startswith("FZ")) & (df["AvgWeeklyUsage"] > 0)].copy()
