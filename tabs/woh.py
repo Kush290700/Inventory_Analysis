@@ -374,7 +374,7 @@ def woh_tab(sheets, theme):
     sku_stats, prod_detail, cost_val = aggregate_data(sheets)
 
     # Tabs for each workflow
-    tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "FZ → EXT Transfer",
     "EXT → FZ Transfer",
     "Purchase Plan",
