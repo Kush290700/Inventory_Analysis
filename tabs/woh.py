@@ -164,10 +164,9 @@ def aggregate_data(sheets, weeks_override=None):
     cost_val['NumPacks']  = pd.to_numeric(cost_val['NumPacks'], errors='coerce').fillna(0)
     cost_val['WeightLb']  = pd.to_numeric(cost_val['WeightLb'], errors='coerce').fillna(0)
 
-    # ─── Compute packsize by summing all WeightLb and all NumPacks per SKU ─────────
+    # ─── Compute aggregated pack size (total weight ÷ total packs) per SKU ─────────
     packs_sum   = cost_val.groupby('SKU')['NumPacks'].sum()
     weight_sum  = cost_val.groupby('SKU')['WeightLb'].sum()
-    # Avoid division by zero; if packs_sum is zero, result becomes NaN
     packsize_agg = (weight_sum / packs_sum).replace([np.inf, -np.inf], np.nan)
     packsize_map = packsize_agg.to_dict()
     # ──────────────────────────────────────────────────────────────────────────────
@@ -425,22 +424,34 @@ def woh_tab(sheets, theme):
             (sku_stats['AvgWeeklyUsage'] > 0)
         ].copy()
 
+        # Join EXT on-hand weight & packs into the FZ DataFrame
+        ext_onhand_wt    = ext.set_index("SKU")["OnHandWeightTotal"].rename("EXT_OnHandWeight")
+        ext_onhand_packs = ext.set_index("SKU")["NumPacksOnHand"].rename("EXT_NumPacksOnHand")
+        fz = fz.join(ext_onhand_wt,    on="SKU")
+        fz = fz.join(ext_onhand_packs, on="SKU")
+        fz["EXT_OnHandWeight"]    = fz["EXT_OnHandWeight"].fillna(0)
+        fz["EXT_NumPacksOnHand"]  = fz["EXT_NumPacksOnHand"].fillna(0).astype(int)
+
+        # Compute combined on-hand weight and combined packs for each SKU
+        fz["Total_OnHandWeight"] = fz["OnHandWeightTotal"] + fz["EXT_OnHandWeight"]
+        fz["Total_PacksOnHand"]  = fz["NumPacksOnHand"] + fz["EXT_NumPacksOnHand"]
+
         thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 4.0, 1.5, 0.25)
         fz['DesiredFZ_Weight'] = fz['AvgWeeklyUsage'] * thr1
         fz['WeightToMove']     = (fz['OnHandWeightTotal'] - fz['DesiredFZ_Weight']).clip(lower=0)
 
-        # Find EXT stock for these SKUs (if exists)
-        ext_onhand = ext.set_index("SKU")["OnHandWeightTotal"].rename("EXT_Weight")
-        fz = fz.join(ext_onhand, on="SKU")
-        fz["EXT_Weight"] = fz["EXT_Weight"].fillna(0)
-
         move = fz[fz["WeightToMove"] > 0].copy()
 
-        # ─── Use NumPacksOnHand for accurate “Available Packs” ─────────
-        move['AvailablePacks']    = move['NumPacksOnHand']
-        move['TotalShippedLb']    = move['TotalShippedLb'].fillna(0)
-        move['TotalProductionLb'] = move['TotalProductionLb'].fillna(0)
-        # ────────────────────────────────────────────────────────────────
+        # ─── Use FZ & EXT on-hand weight & packs, plus totals ────────────────
+        move['FZ_OnHandWeight']         = move['OnHandWeightTotal']
+        move['FZ_PacksOnHand']          = move['NumPacksOnHand']
+        move['EXT_OnHandWeight']        = move['EXT_OnHandWeight']
+        move['EXT_PacksOnHand']         = move['EXT_NumPacksOnHand']
+        move['Total_OnHandWeight']      = move['Total_OnHandWeight']
+        move['Total_PacksOnHand']       = move['Total_PacksOnHand']
+        move['TotalShippedLb']          = move['TotalShippedLb'].fillna(0)
+        move['TotalProductionLb']       = move['TotalProductionLb'].fillna(0)
+        # ─────────────────────────────────────────────────────────────────────
 
         # Display metrics
         c1, c2, c3 = st.columns(3)
@@ -448,7 +459,7 @@ def woh_tab(sheets, theme):
         c2.metric("Total Weight to Move", f"{move['WeightToMove'].sum():,.0f} lb")
         c3.metric("Total Cost to Move", "$0")  # placeholder; replace if you have cost logic
 
-        # Download: exclude TotalOnHand_FZ_EXT, OnHandCostTotal, CostToMove
+        # Download: include FZ & EXT on-hand and pack columns
         if not move.empty:
             buf1 = io.BytesIO()
             move_cols = [
@@ -456,15 +467,16 @@ def woh_tab(sheets, theme):
                 'SKU_Desc',
                 'Supplier',
                 'ProductState',
-                'OnHandWeightTotal',
+                'FZ_OnHandWeight',
+                'FZ_PacksOnHand',
+                'EXT_OnHandWeight',
+                'EXT_PacksOnHand',
+                'Total_OnHandWeight',
+                'Total_PacksOnHand',
                 'AvgWeeklyUsage',
                 'WeeksOnHand',
                 'DesiredFZ_Weight',
-                'WeightToMove',
-                # new columns
-                'AvailablePacks',
-                'TotalShippedLb',
-                'TotalProductionLb'
+                'WeightToMove'
             ]
             move[move_cols].to_excel(buf1, index=False, sheet_name="FZ2EXT")
             buf1.seek(0)
@@ -503,10 +515,17 @@ def woh_tab(sheets, theme):
             (sku_stats['AvgWeeklyUsage'] > 0)
         ].copy()
 
-        # Build lookup of FZ inventory for EXT SKUs
-        fz_onhand = fz.set_index("SKU")["OnHandWeightTotal"].rename("FZ_Weight")
-        ext = ext.join(fz_onhand, on="SKU")
-        ext["FZ_Weight"] = ext["FZ_Weight"].fillna(0)
+        # Join FZ on-hand weight & packs into the EXT DataFrame
+        fz_onhand_wt    = fz.set_index("SKU")["OnHandWeightTotal"].rename("FZ_OnHandWeight")
+        fz_onhand_packs = fz.set_index("SKU")["NumPacksOnHand"].rename("FZ_NumPacksOnHand")
+        ext = ext.join(fz_onhand_wt,    on="SKU")
+        ext = ext.join(fz_onhand_packs, on="SKU")
+        ext["FZ_OnHandWeight"]    = ext["FZ_OnHandWeight"].fillna(0)
+        ext["FZ_NumPacksOnHand"]  = ext["FZ_NumPacksOnHand"].fillna(0).astype(int)
+
+        # Compute combined on-hand weight and combined packs for each SKU
+        ext["Total_OnHandWeight"] = ext["OnHandWeightTotal"] + ext["FZ_OnHandWeight"]
+        ext["Total_PacksOnHand"]  = ext["NumPacksOnHand"] + ext["FZ_NumPacksOnHand"]
 
         thr2_default = 1.0
         try:
@@ -523,14 +542,19 @@ def woh_tab(sheets, theme):
         )
 
         ext["DesiredFZ_Weight"] = ext["AvgWeeklyUsage"] * thr2
-        ext["WeightToReturn"]   = (ext["DesiredFZ_Weight"] - ext["FZ_Weight"]).clip(lower=0)
+        ext["WeightToReturn"]   = (ext["DesiredFZ_Weight"] - ext["FZ_OnHandWeight"]).clip(lower=0)
 
         back = ext[ext["WeightToReturn"] > 0].copy()
 
-        # ─── Use NumPacksOnHand for accurate “Available Packs” ─────────
-        back['AvailablePacks']    = back['NumPacksOnHand']
-        back['TotalShippedLb']    = back['TotalShippedLb'].fillna(0)
-        back['TotalProductionLb'] = back['TotalProductionLb'].fillna(0)
+        # ─── Use FZ & EXT on-hand weight & packs, plus totals ────────────────
+        back['EXT_OnHandWeight']   = back['OnHandWeightTotal']
+        back['EXT_PacksOnHand']    = back['NumPacksOnHand']
+        back['FZ_OnHandWeight']    = back['FZ_OnHandWeight']
+        back['FZ_PacksOnHand']     = back['FZ_NumPacksOnHand']
+        back['Total_OnHandWeight'] = back['Total_OnHandWeight']
+        back['Total_PacksOnHand']  = back['Total_PacksOnHand']
+        back['TotalShippedLb']     = back['TotalShippedLb'].fillna(0)
+        back['TotalProductionLb']  = back['TotalProductionLb'].fillna(0)
         # ────────────────────────────────────────────────────────────────
 
         # Display metrics
@@ -539,7 +563,7 @@ def woh_tab(sheets, theme):
         col2.metric("Total Weight to Return", f"{back['WeightToReturn'].sum():,.0f} lb")
         col3.metric("Total Cost to Return", "$0")  # placeholder; replace if you have cost logic
 
-        # Download: exclude TotalOnHand_EXT_FZ, OnHandCostTotal, CostToReturn
+        # Download: include FZ & EXT on-hand and pack columns
         if not back.empty:
             buf2 = io.BytesIO()
             back_cols = [
@@ -547,15 +571,16 @@ def woh_tab(sheets, theme):
                 'SKU_Desc',
                 'Supplier',
                 'ProductState',
-                'OnHandWeightTotal',
+                'EXT_OnHandWeight',
+                'EXT_PacksOnHand',
+                'FZ_OnHandWeight',
+                'FZ_PacksOnHand',
+                'Total_OnHandWeight',
+                'Total_PacksOnHand',
                 'AvgWeeklyUsage',
                 'WeeksOnHand',
                 'DesiredFZ_Weight',
-                'WeightToReturn',
-                # new columns
-                'AvailablePacks',
-                'TotalShippedLb',
-                'TotalProductionLb'
+                'WeightToReturn'
             ]
             back[back_cols].to_excel(buf2, index=False, sheet_name="EXT2FZ")
             buf2.seek(0)
