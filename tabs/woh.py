@@ -127,15 +127,15 @@ def aggregate_data(sheets, weeks_override=None):
       prod_detail    → raw “Product Detail” (for lookups)
       cost_val       → raw “Cost Value” (unused for pack logic now)
       total_packs    → DataFrame {SKU, Inv_TotalPacks} (sum of packs on hand across all states)
-      pd1_pack_sum   → DataFrame {SKU, ProductDetail1_TotalPacks} (sum of distinct PackId1 in ProductDetail1)
+      inv1_pack_sum  → DataFrame {SKU, InventoryDetail1_TotalPacks} (sum of distinct PackId1 in Inventory Detail1)
     """
 
     inv_df      = sheets.get('Inventory Detail', pd.DataFrame()).copy()
     sales_df    = sheets.get('Sales History', pd.DataFrame()).copy()
     prod_df     = sheets.get('Production Batch', pd.DataFrame()).copy()
     prod_detail = sheets.get('Product Detail', pd.DataFrame()).copy()
-    pd1         = sheets.get('Product Detail1', pd.DataFrame()).copy()   # <— new!
-    cost_val    = sheets.get('Cost Value', pd.DataFrame()).copy()         # kept, but not used for packs
+    inv1        = sheets.get('Inventory Detail1', pd.DataFrame()).copy()   # <— now using "Inventory Detail1"
+    cost_val    = sheets.get('Cost Value', pd.DataFrame()).copy()          # still loaded but not used for packs
 
     #
     # ── 1) CLEAN & NORMALIZE ALL DATAFRAMES ────────────────────────────────────
@@ -169,17 +169,22 @@ def aggregate_data(sheets, weeks_override=None):
     prod_detail['ParentSKU'] = prod_detail['Velocity Parent'].map(clean_sku)
     prod_detail['SKU_Desc']  = prod_detail['Description'].fillna("").astype(str)
 
-    # ---- NEW: Product Detail1 (pd1) ----
+    # ---- NEW: Inventory Detail1 (inv1) ----
     #    We only need {SKU, ProductState, PackId1, WeightLb} from this sheet.
-    pd1['SKU']         = pd1['SKU'].map(clean_sku)
-    pd1['ProductState']= pd1.get('ProductState', '').str.upper().fillna('')
-    pd1['PackId1']     = pd1['PackId1'].astype(str).str.strip().fillna('')
-    pd1['WeightLb']    = pd.to_numeric(pd1['WeightLb'], errors='coerce').fillna(0)
+    if not inv1.empty and all(col in inv1.columns for col in ["SKU", "ProductState", "PackId1", "WeightLb"]):
+        inv1['SKU']         = inv1['SKU'].map(clean_sku)
+        inv1['ProductState']= inv1['ProductState'].str.upper().fillna('')
+        inv1['PackId1']     = inv1['PackId1'].astype(str).str.strip().fillna('')
+        inv1['WeightLb']    = pd.to_numeric(inv1['WeightLb'], errors='coerce').fillna(0)
+    else:
+        # If "Inventory Detail1" is missing required columns, replace with an empty DataFrame
+        inv1 = pd.DataFrame(columns=["SKU", "ProductState", "PackId1", "WeightLb"])
 
     # ---- Cost Value (cost_val) – still loaded but not used for pack logic now ----
-    cost_val['SKU']      = cost_val['SKU'].map(clean_sku)
-    cost_val['NumPacks'] = pd.to_numeric(cost_val['NumPacks'], errors='coerce').fillna(0)
-    cost_val['WeightLb'] = pd.to_numeric(cost_val['WeightLb'], errors='coerce').fillna(0)
+    cost_val['SKU']      = cost_val['SKU'].map(clean_sku) if 'SKU' in cost_val else cost_val.get('SKU', pd.Series()).map(clean_sku)
+    if 'NumPacks' in cost_val and 'WeightLb' in cost_val:
+        cost_val['NumPacks'] = pd.to_numeric(cost_val['NumPacks'], errors='coerce').fillna(0)
+        cost_val['WeightLb'] = pd.to_numeric(cost_val['WeightLb'], errors='coerce').fillna(0)
 
     #
     # ── 2) AGGREGATE SALES & INVENTORY (weight & cost), exactly as before ─────
@@ -223,7 +228,7 @@ def aggregate_data(sheets, weeks_override=None):
         "Cost": 0.0,
         "Rev": 0.0
     })
-    mask_blank = df["Supplier"].astype(str).str.strip() == ""
+    mask_blank = (df["Supplier"].astype(str).str.strip() == "")
     df.loc[mask_blank, "Supplier"] = df.loc[mask_blank, "SKU"].map(supplier_map).fillna("")
 
     df = df.merge(
@@ -269,13 +274,13 @@ def aggregate_data(sheets, weeks_override=None):
                                   )
 
     #
-    # ── 3) USE Product Detail1 TO COUNT EXACT PACKS ON HAND ─────────────────────
+    # ── 3) USE Inventory Detail1 (inv1) TO COUNT EXACT PACKS ON HAND ────────────
     #
 
     # 3a) Count distinct PackId1 per (SKU, ProductState)
-    if not pd1.empty:
+    if not inv1.empty:
         pack_counts = (
-            pd1
+            inv1
             .loc[:, ['SKU', 'ProductState', 'PackId1']]
             .dropna(subset=['PackId1'])
             .assign(PackId1=lambda d: d['PackId1'].astype(str).str.strip())
@@ -285,7 +290,7 @@ def aggregate_data(sheets, weeks_override=None):
     else:
         pack_counts = pd.DataFrame(columns=["SKU", "ProductState", "NumPacksOnHand"])
 
-    # 3b) Merge pack_counts into sku_stats → any missing (SKU,ProductState) gets 0
+    # 3b) Merge pack_counts into sku_stats → any missing (SKU,ProductState) gets 0 packs
     sku_stats = sku_stats.merge(
         pack_counts,
         on=["SKU", "ProductState"],
@@ -301,14 +306,14 @@ def aggregate_data(sheets, weeks_override=None):
         .rename(columns={"NumPacksOnHand": "Inv_TotalPacks"})
     )
 
-    # 3d) Also capture total packs from pd1 by SKU for debug
-    pd1_pack_sum = (
-        pd1
+    # 3d) Also capture total packs from inv1 by SKU for debug
+    inv1_pack_sum = (
+        inv1
         .loc[:, ['SKU', 'PackId1']]
         .dropna(subset=['PackId1'])
         .assign(PackId1=lambda d: d['PackId1'].astype(str).str.strip())
         .groupby("SKU", as_index=False)
-        .agg(ProductDetail1_TotalPacks=("PackId1", "nunique"))
+        .agg(InventoryDetail1_TotalPacks=("PackId1", "nunique"))
     )
 
     #
@@ -327,7 +332,7 @@ def aggregate_data(sheets, weeks_override=None):
     sku_stats['Supplier']     = sku_stats['Supplier'].replace("", "Unknown").fillna("Unknown")
     sku_stats['ProductState'] = sku_stats['ProductState'].fillna("").str.upper()
 
-    return sku_stats, prod_detail, cost_val, total_packs, pd1_pack_sum
+    return sku_stats, prod_detail, cost_val, total_packs, inv1_pack_sum
 
 
 # ------------------- PARENT PREPROCESS & PURCHASE PLAN HELPERS ───────────────── #
@@ -413,16 +418,22 @@ def compute_parent_purchase_plan(sku_stats, prod_detail, cost_val, desired_woh):
     parent_stats['DesiredWt']   = parent_stats['MeanUse'] * desired_woh
     parent_stats['ToBuyWt']     = (parent_stats['DesiredWt'] - parent_stats['InvWt']).clip(lower=0)
 
-    # Derive packsize per ParentSKU by averaging all child packsizes
-    # First, create a child→parent map from sku_stats:
+    # Derive packsize per ParentSKU: median of child pack sizes
     child_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
-    # We already have packsize per SKU in sku_stats, so:
-    packsize_map_per_child = dict(zip(sku_stats['SKU'], sku_stats['OnHandWeightTotal'] / sku_stats['NumPacksOnHand'].replace({0: np.nan})))
-    # Group by ParentSKU:
+    packsize_map_per_child = dict(
+        zip(
+            sku_stats['SKU'],
+            (sku_stats['OnHandWeightTotal'] / sku_stats['NumPacksOnHand'].replace({0: np.nan}))
+        )
+    )
     parent_packsize = {}
     for parent in parent_stats['ParentSKU'].unique():
         children = [sku for sku, p in child_map.items() if p == parent]
-        psizes  = [packsize_map_per_child.get(c) for c in children if packsize_map_per_child.get(c, np.nan) and not pd.isna(packsize_map_per_child.get(c))]
+        psizes   = [
+            packsize_map_per_child.get(c)
+            for c in children
+            if packsize_map_per_child.get(c, np.nan) and not pd.isna(packsize_map_per_child.get(c))
+        ]
         if psizes:
             parent_packsize[parent] = float(np.nanmedian(psizes))
         else:
@@ -461,12 +472,12 @@ def woh_tab(sheets, theme):
       - "Sales History"
       - "Production Batch"
       - "Product Detail"
-      - "Product Detail1"  ← used for exact pack counts
-      - "Cost Value"       ← (not used for pack counts in this version)
+      - "Inventory Detail1"  ← used for exact pack counts
+      - "Cost Value"         ← (not used for pack counts in this version)
     """
     st.header("📦 Advanced Inventory Weeks-On-Hand (WOH) Dashboard")
 
-    sku_stats, prod_detail, cost_val, total_packs, pd1_pack_sum = aggregate_data(sheets)
+    sku_stats, prod_detail, cost_val, total_packs, inv1_pack_sum = aggregate_data(sheets)
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "FZ → EXT Transfer",
@@ -671,7 +682,7 @@ def woh_tab(sheets, theme):
         parent_plan['DesiredWt'] = parent_plan['MeanUse'] * desired_woh
         parent_plan['ToBuyWt']   = (parent_plan['DesiredWt'] - parent_plan['InvWt']).clip(lower=0)
 
-        # Derive packsize per ParentSKU: median of its children’s (OnHandWeightTotal ÷ NumPacksOnHand)
+        # Derive packsize per ParentSKU: median of child pack sizes
         child_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
         packsize_map_per_child = dict(
             zip(
@@ -681,9 +692,12 @@ def woh_tab(sheets, theme):
         )
         parent_packsize = {}
         for parent in parent_plan['SKU']:
-            # find any child SKUs that map to this parent
             children = [sku for sku, p in child_map.items() if p == parent]
-            psizes   = [packsize_map_per_child.get(c) for c in children if packsize_map_per_child.get(c, np.nan) and not pd.isna(packsize_map_per_child.get(c))]
+            psizes   = [
+                packsize_map_per_child.get(c)
+                for c in children
+                if packsize_map_per_child.get(c, np.nan) and not pd.isna(packsize_map_per_child.get(c))
+            ]
             if psizes:
                 parent_packsize[parent] = float(np.nanmedian(psizes))
             else:
@@ -848,8 +862,8 @@ def woh_tab(sheets, theme):
             st.info("Enter a SKU or product description to search.")
 
     # --- 10) PACK COUNT DEBUG EXPANDER ---
-    with st.expander("🔍 Pack Count Tracking (ProductDetail1 vs Inventory)"):
+    with st.expander("🔍 Pack Count Tracking (InventoryDetail1 vs Inventory)"):
         inv_packs = total_packs.rename(columns={"Inv_TotalPacks": "Inv_TotalPacks_onSKU"})
-        merged_debug = pd1_pack_sum.merge(inv_packs, on="SKU", how="outer").fillna(0)
-        merged_debug["Difference"] = merged_debug["ProductDetail1_TotalPacks"] - merged_debug["Inv_TotalPacks_onSKU"]
+        merged_debug = inv1_pack_sum.merge(inv_packs, on="SKU", how="outer").fillna(0)
+        merged_debug["Difference"] = merged_debug["InventoryDetail1_TotalPacks"] - merged_debug["Inv_TotalPacks_onSKU"]
         st.dataframe(merged_debug, use_container_width=True)
