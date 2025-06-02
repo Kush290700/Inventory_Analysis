@@ -165,8 +165,8 @@ def aggregate_data(sheets, weeks_override=None):
     cost_val['WeightLb']  = pd.to_numeric(cost_val['WeightLb'], errors='coerce').fillna(0)
 
     # ─── Compute aggregated pack size (total weight ÷ total packs) per SKU ─────────
-    packs_sum   = cost_val.groupby('SKU')['NumPacks'].sum()
-    weight_sum  = cost_val.groupby('SKU')['WeightLb'].sum()
+    packs_sum    = cost_val.groupby('SKU')['NumPacks'].sum()
+    weight_sum   = cost_val.groupby('SKU')['WeightLb'].sum()
     packsize_agg = (weight_sum / packs_sum).replace([np.inf, -np.inf], np.nan)
     packsize_map = packsize_agg.to_dict()
     # ──────────────────────────────────────────────────────────────────────────────
@@ -256,12 +256,13 @@ def aggregate_data(sheets, weeks_override=None):
     # Add PackSize from the aggregated packsize_map
     sku_stats["PackSize"] = sku_stats["SKU"].map(packsize_map)
 
-    # Now compute NumPacksOnHand per state by dividing that state's weight by pack size
+    # Compute NumPacksOnHand per state via floor division
     def compute_state_packs(row):
         ps = row["PackSize"]
-        if pd.isna(ps) or ps <= 0:
+        w  = row["OnHandWeightTotal"]
+        if pd.isna(ps) or ps <= 0 or w <= 0:
             return 0
-        return int(np.floor(row["OnHandWeightTotal"] / ps))
+        return int(w // ps)
 
     sku_stats["NumPacksOnHand"] = sku_stats.apply(compute_state_packs, axis=1)
 
