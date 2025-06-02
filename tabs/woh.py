@@ -99,9 +99,11 @@ def get_next_delivery(supplier, now=None):
 # ------------------- UTILITY FUNCTIONS ------------------- #
 
 def clean_sku(x):
-    if pd.isnull(x): return ""
+    if pd.isnull(x):
+        return ""
     x = str(x).strip()
-    if x.endswith(".0"): x = x[:-2]
+    if x.endswith(".0"):
+        x = x[:-2]
     return x
 
 def calculate_weeks_in_data(sales_df):
@@ -114,62 +116,71 @@ def calculate_weeks_in_data(sales_df):
         return 4
     return max(1, ((max_d - min_d).days + 1) // 7)
 
+
 # ------------------- AGGREGATION FUNCTION ------------------- #
 
 def aggregate_data(sheets, weeks_override=None):
     # Sheets
-    inv_df = sheets.get('Inventory Detail', pd.DataFrame()).copy()
-    sales_df = sheets.get('Sales History', pd.DataFrame()).copy()
-    prod_df = sheets.get('Production Batch', pd.DataFrame()).copy()
+    inv_df      = sheets.get('Inventory Detail', pd.DataFrame()).copy()
+    sales_df    = sheets.get('Sales History', pd.DataFrame()).copy()
+    prod_df     = sheets.get('Production Batch', pd.DataFrame()).copy()
     prod_detail = sheets.get('Product Detail', pd.DataFrame()).copy()
-    cost_val = sheets.get('Cost Value', pd.DataFrame()).copy()
+    cost_val    = sheets.get('Cost Value', pd.DataFrame()).copy()
 
-    # Clean up
+    # Clean up Inventory
     inv_df = inv_df.rename(columns={'SKU': 'SKU_Full'})
     inv_df['SKU'] = inv_df['SKU_Full'].str.extract(r'(\d+)').fillna(inv_df['SKU_Full'])
     inv_df['SKU'] = inv_df['SKU'].map(clean_sku)
     inv_df['ProductState'] = inv_df.get('ProductState', '').str.upper().fillna('')
-    inv_df['ProductName'] = inv_df.get('SKU_Full', '').astype(str)
-    inv_df['WeightLb'] = pd.to_numeric(inv_df['WeightLb'], errors='coerce').fillna(0)
-    inv_df['CostValue'] = pd.to_numeric(inv_df['CostValue'], errors='coerce').fillna(0)
+    inv_df['ProductName']  = inv_df.get('SKU_Full', '').astype(str)
+    inv_df['WeightLb']     = pd.to_numeric(inv_df['WeightLb'], errors='coerce').fillna(0)
+    inv_df['CostValue']    = pd.to_numeric(inv_df['CostValue'], errors='coerce').fillna(0)
 
-    # Sales
-    sales_df['SKU'] = sales_df['SKU'].map(clean_sku)
-    sales_df['ShippedLb'] = pd.to_numeric(sales_df['ShippedLb'], errors='coerce').fillna(0)
-    sales_df['QuantityOrdered'] = pd.to_numeric(sales_df['QuantityOrdered'], errors='coerce').fillna(0)
-    sales_df['Cost'] = pd.to_numeric(sales_df['Cost'], errors='coerce').fillna(0)
-    sales_df['Rev'] = pd.to_numeric(sales_df['Rev'], errors='coerce').fillna(0)
+    # Clean up Sales
+    sales_df['SKU']            = sales_df['SKU'].map(clean_sku)
+    sales_df['ShippedLb']      = pd.to_numeric(sales_df['ShippedLb'], errors='coerce').fillna(0)
+    sales_df['QuantityOrdered']= pd.to_numeric(sales_df['QuantityOrdered'], errors='coerce').fillna(0)
+    sales_df['Cost']           = pd.to_numeric(sales_df['Cost'], errors='coerce').fillna(0)
+    sales_df['Rev']            = pd.to_numeric(sales_df['Rev'], errors='coerce').fillna(0)
 
-    # Production
+    # Clean up Production
     prod_df['SKU'] = prod_df['SKU'].map(clean_sku)
-    if 'ProductionShippedLb' in prod_df:
-        prod_df['ProductionShippedLb'] = pd.to_numeric(prod_df['WeightLb'], errors='coerce').fillna(0.0)
+    if 'ProductionShippedLb' in prod_df.columns:
+        prod_df['ProductionShippedLb'] = pd.to_numeric(
+            prod_df['ProductionShippedLb'], errors='coerce'
+        ).fillna(0.0)
     else:
-        prod_df['ProductionShippedLb'] = pd.to_numeric(prod_df.get('WeightLb', 0), errors='coerce').fillna(0.0)
+        prod_df['ProductionShippedLb'] = pd.to_numeric(
+            prod_df.get('WeightLb', 0), errors='coerce'
+        ).fillna(0.0)
 
     # Product Detail
-    prod_detail['SKU'] = prod_detail['Product Code'].map(clean_sku)
-    prod_detail['ParentSKU'] = prod_detail['Velocity Parent'].map(clean_sku)
-    prod_detail['SKU_Desc'] = prod_detail['Description'].fillna("").astype(str)
+    prod_detail['SKU']        = prod_detail['Product Code'].map(clean_sku)
+    prod_detail['ParentSKU']  = prod_detail['Velocity Parent'].map(clean_sku)
+    prod_detail['SKU_Desc']   = prod_detail['Description'].fillna("").astype(str)
 
     # Cost/Pack Info
-    cost_val['SKU'] = cost_val['SKU'].map(clean_sku)
-    cost_val['NumPacks'] = pd.to_numeric(cost_val['NumPacks'], errors='coerce')
-    cost_val['WeightLb'] = pd.to_numeric(cost_val['WeightLb'], errors='coerce')
-    cost_val['PackSize'] = np.where(
-        cost_val['NumPacks'] > 0, cost_val['WeightLb'] / cost_val['NumPacks'], np.nan
-    )
-    packsize_map = dict(zip(cost_val['SKU'], cost_val['PackSize']))
+    cost_val['SKU']       = cost_val['SKU'].map(clean_sku)
+    cost_val['NumPacks']  = pd.to_numeric(cost_val['NumPacks'], errors='coerce').fillna(0)
+    cost_val['WeightLb']  = pd.to_numeric(cost_val['WeightLb'], errors='coerce').fillna(0)
+
+    # ─── Compute packsize by summing all WeightLb and all NumPacks per SKU ─────────
+    packs_sum   = cost_val.groupby('SKU')['NumPacks'].sum()
+    weight_sum  = cost_val.groupby('SKU')['WeightLb'].sum()
+    # Avoid division by zero; if packs_sum is zero, result becomes NaN
+    packsize_agg = (weight_sum / packs_sum).replace([np.inf, -np.inf], np.nan)
+    packsize_map = packsize_agg.to_dict()
+    # ──────────────────────────────────────────────────────────────────────────────
 
     # ------------------ AGGREGATE SALES ------------------
     agg_sales = (
         sales_df
         .groupby(["SKU", "Supplier", "Protein", "Description"], as_index=False)
         .agg(
-            ShippedLb=("ShippedLb", "sum"),
-            QuantityOrdered=("QuantityOrdered", "sum"),
-            Cost=("Cost", "sum"),
-            Rev=("Rev", "sum")
+            ShippedLb       = ("ShippedLb", "sum"),
+            QuantityOrdered = ("QuantityOrdered", "sum"),
+            Cost            = ("Cost", "sum"),
+            Rev             = ("Rev", "sum")
         )
     )
 
@@ -178,8 +189,8 @@ def aggregate_data(sheets, weeks_override=None):
         inv_df
         .groupby(["SKU", "ProductState", "ProductName"], as_index=False)
         .agg(
-            OnHandWeightLb=("WeightLb", "sum"),
-            OnHandCost=("CostValue", "sum")
+            OnHandWeightLb = ("WeightLb", "sum"),
+            OnHandCost     = ("CostValue", "sum")
         )
     )
 
@@ -200,9 +211,7 @@ def aggregate_data(sheets, weeks_override=None):
         "Rev": 0.0
     })
     mask_blank = df["Supplier"].astype(str).str.strip() == ""
-    df.loc[mask_blank, "Supplier"] = (
-        df.loc[mask_blank, "SKU"].map(supplier_map).fillna("")
-    )
+    df.loc[mask_blank, "Supplier"] = df.loc[mask_blank, "SKU"].map(supplier_map).fillna("")
     df = df.merge(
         prod_df[["SKU", "ProductionShippedLb"]],
         on="SKU",
@@ -213,7 +222,8 @@ def aggregate_data(sheets, weeks_override=None):
     # ------------------ FINAL AGGREGATION ------------------
     try:
         weeks_span = weeks_override or calculate_weeks_in_data(sales_df)
-        if weeks_span <= 0: weeks_span = 4
+        if weeks_span <= 0:
+            weeks_span = 4
     except Exception:
         weeks_span = 4
 
@@ -234,74 +244,85 @@ def aggregate_data(sheets, weeks_override=None):
     )
     sku_stats["TotalUsage"]     = sku_stats["TotalShippedLb"] + sku_stats["TotalProductionLb"]
     sku_stats["AvgWeeklyUsage"] = sku_stats["TotalUsage"] / weeks_span
-    sku_stats["WOH_Flag"] = np.where(sku_stats["TotalUsage"] == 0, "No Usage", "")
-    sku_stats["WeeksOnHand"] = (
-        sku_stats["OnHandWeightTotal"]
-        / sku_stats["AvgWeeklyUsage"].replace({0: np.nan})
-    )
-    sku_stats["WeeksOnHand"] = sku_stats["WeeksOnHand"].replace([np.inf, -np.inf], np.nan)
-    sku_stats["AnnualTurns"] = (
-        sku_stats["AvgWeeklyUsage"] * 52.0
-        / sku_stats["OnHandWeightTotal"].replace({0: np.nan})
-    )
-    sku_stats["AnnualTurns"] = sku_stats["AnnualTurns"].replace([np.inf, -np.inf], 0).fillna(0)
-    sku_stats["SKU_Desc"] = (
-        sku_stats["SKU"]
-        + " – "
-        + sku_stats["ProductName"].where(
-            sku_stats["ProductName"].ne(""),
-            sku_stats["Description"]
-        )
-    )
-    # Add PackSize, ParentSKU
+    sku_stats["WOH_Flag"]       = np.where(sku_stats["TotalUsage"] == 0, "No Usage", "")
+    sku_stats["WeeksOnHand"]    = sku_stats["OnHandWeightTotal"] / sku_stats["AvgWeeklyUsage"].replace({0: np.nan})
+    sku_stats["WeeksOnHand"]    = sku_stats["WeeksOnHand"].replace([np.inf, -np.inf], np.nan)
+    sku_stats["AnnualTurns"]    = (sku_stats["AvgWeeklyUsage"] * 52.0) / sku_stats["OnHandWeightTotal"].replace({0: np.nan})
+    sku_stats["AnnualTurns"]    = sku_stats["AnnualTurns"].replace([np.inf, -np.inf], 0).fillna(0)
+    sku_stats["SKU_Desc"]       = sku_stats["SKU"] + " – " + sku_stats["ProductName"].where(
+                                    sku_stats["ProductName"].ne(""),
+                                    sku_stats["Description"]
+                                )
+
+    # Add PackSize from the aggregated packsize_map
     sku_stats["PackSize"] = sku_stats["SKU"].map(packsize_map)
-    desc_map = dict(zip(prod_detail['SKU'], prod_detail['SKU_Desc']))
+
+    # Add ParentSKU & possibly replace SKU_Desc with more detailed description
+    desc_map   = dict(zip(prod_detail['SKU'], prod_detail['SKU_Desc']))
     parent_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
-    sku_stats['SKU_Desc'] = sku_stats['SKU'].map(desc_map).fillna(sku_stats['SKU_Desc'])
+    sku_stats['SKU_Desc']  = sku_stats['SKU'].map(desc_map).fillna(sku_stats['SKU_Desc'])
     sku_stats['ParentSKU'] = sku_stats['SKU'].map(parent_map).fillna(sku_stats['SKU'])
-    mask = (sku_stats["ParentSKU"].isin(["", "nan", "none", "null"])) | (sku_stats["ParentSKU"].isna())
+    mask = (
+        sku_stats["ParentSKU"].isin(["", "nan", "none", "null"]) |
+        sku_stats["ParentSKU"].isna()
+    )
     sku_stats.loc[mask, "ParentSKU"] = sku_stats.loc[mask, "SKU"]
 
+    # ─── Sum up NumPacks from cost_val and join into sku_stats ───────────────
+    try:
+        packs_sum    = cost_val.groupby('SKU')['NumPacks'].sum()
+        sku_stats['NumPacksOnHand'] = sku_stats['SKU'].map(packs_sum).fillna(0).astype(int)
+    except Exception:
+        sku_stats['NumPacksOnHand'] = 0
+    # ────────────────────────────────────────────────────────────────────────
+
     # Use Supplier from agg or product
-    sku_stats['Supplier'] = sku_stats['Supplier'].replace("", "Unknown").fillna("Unknown")
+    sku_stats['Supplier']     = sku_stats['Supplier'].replace("", "Unknown").fillna("Unknown")
     sku_stats['ProductState'] = sku_stats['ProductState'].fillna("").str.upper()
 
     return sku_stats, prod_detail, cost_val
 
+
 def get_root_parent(sku, parent_map):
     """Follow the parent chain up to the root."""
     seen = set()
-    while sku in parent_map and pd.notnull(parent_map[sku]) and parent_map[sku] != "" and parent_map[sku] != sku:
-        if sku in seen:   # avoid infinite loop
+    while (
+        sku in parent_map
+        and pd.notnull(parent_map[sku])
+        and parent_map[sku] != ""
+        and parent_map[sku] != sku
+    ):
+        if sku in seen:
             break
         seen.add(sku)
         sku = parent_map[sku]
     return sku
+
 
 def get_best_description(group):
     """Choose the most common non-empty description in the group."""
     descs = group['SKU_Desc'].dropna().unique()
     if len(descs) == 0:
         return ""
-    # Use the longest description or most common (your choice)
-    return max(descs, key=lambda x: (len(x), x))  # longest, then alpha
+    return max(descs, key=lambda x: (len(x), x))  # longest, then alphabetical
+
 
 def preprocess_for_parents(sku_stats, prod_detail):
     parent_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
-    desc_map = dict(zip(prod_detail['SKU'], prod_detail['SKU_Desc']))
+    desc_map   = dict(zip(prod_detail['SKU'], prod_detail['SKU_Desc']))
 
     # Add TrueParent column by following chain up
     sku_stats['TrueParent'] = sku_stats['SKU'].apply(lambda x: get_root_parent(x, parent_map))
     # Add Description candidate for each SKU
-    sku_stats['SKU_Desc'] = sku_stats['SKU'].map(desc_map).fillna(sku_stats['SKU_Desc'])
+    sku_stats['SKU_Desc']   = sku_stats['SKU'].map(desc_map).fillna(sku_stats['SKU_Desc'])
 
     # These are always safe
     agg_dict = {
         'MeanUse': ('AvgWeeklyUsage', 'sum'),
-        'InvWt': ('OnHandWeightTotal', 'sum'),
-        'InvCost': ('OnHandCostTotal', 'sum'),
+        'InvWt':   ('OnHandWeightTotal', 'sum'),
+        'InvCost': ('OnHandCostTotal',   'sum'),
         'Supplier': ('Supplier', lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0]),
-        'Protein': ('Protein', lambda x: x.mode()[0] if not x.mode().empty else ""),
+        'Protein':  ('Protein',  lambda x: x.mode()[0] if not x.mode().empty else "")
     }
 
     # Only add these if the columns exist
@@ -315,57 +336,66 @@ def preprocess_for_parents(sku_stats, prod_detail):
     # Now group by TrueParent and aggregate everything up
     agg = (
         sku_stats.groupby('TrueParent', as_index=False)
-            .agg(**agg_dict)
+                 .agg(**agg_dict)
     )
 
     # Get the best description for each root parent
-    desc_lookup = sku_stats.groupby('TrueParent').apply(get_best_description)
+    desc_lookup   = sku_stats.groupby('TrueParent').apply(get_best_description)
     agg['SKU_Desc'] = agg['TrueParent'].map(desc_lookup)
-    agg['SKU'] = agg['TrueParent']  # For consistency downstream
+    agg['SKU']     = agg['TrueParent']  # For consistency downstream
     return agg
-    
+
+
 # ------------------- PARENT PURCHASE PLAN ------------------- #
 
 @st.cache_data(show_spinner=False)
 def compute_parent_purchase_plan(sku_stats, prod_detail, cost_val, desired_woh):
     # Use same logic as before for parent mapping, now with best-agg'd metrics
-    child_to_parent = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
-    parent_desc_map = dict(zip(prod_detail['ParentSKU'], prod_detail['Description'].fillna("").astype(str)))
+    child_to_parent   = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
+    parent_desc_map   = dict(zip(prod_detail['ParentSKU'], prod_detail['Description'].fillna("").astype(str)))
     sku_stats['ParentSKU'] = sku_stats['SKU'].map(child_to_parent).fillna(sku_stats['SKU'])
-    mask = (sku_stats["ParentSKU"].isin(["", "nan", "none", "null"])) | (sku_stats["ParentSKU"].isna())
+    mask = (
+        sku_stats["ParentSKU"].isin(["", "nan", "none", "null"])
+        | sku_stats["ParentSKU"].isna()
+    )
     sku_stats.loc[mask, "ParentSKU"] = sku_stats.loc[mask, "SKU"]
 
     parent_stats = (
         sku_stats.groupby("ParentSKU", as_index=False)
-            .agg(
-                MeanUse=('AvgWeeklyUsage', 'sum'),
-                InvWt=('OnHandWeightTotal', 'sum'),
-                InvCost=('OnHandCostTotal', 'sum'),
-                Supplier=('Supplier', lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0])
-            )
+                 .agg(
+                     MeanUse  = ('AvgWeeklyUsage', 'sum'),
+                     InvWt    = ('OnHandWeightTotal', 'sum'),
+                     InvCost  = ('OnHandCostTotal', 'sum'),
+                     Supplier = ('Supplier', lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0])
+                 )
     )
-    parent_stats['DesiredWt'] = parent_stats['MeanUse'] * desired_woh
-    parent_stats['ToBuyWt'] = (parent_stats['DesiredWt'] - parent_stats['InvWt']).clip(lower=0)
-    packsize_map = sku_stats.groupby('ParentSKU')['PackSize'].median()
-    global_packsize = sku_stats['PackSize'].dropna().mean()
-    parent_stats['PackSize'] = parent_stats['ParentSKU'].map(packsize_map).fillna(global_packsize if not np.isnan(global_packsize) else 1.0)
+    parent_stats['DesiredWt']   = parent_stats['MeanUse'] * desired_woh
+    parent_stats['ToBuyWt']     = (parent_stats['DesiredWt'] - parent_stats['InvWt']).clip(lower=0)
+    packsize_map                = sku_stats.groupby('TrueParent')['PackSize'].median()
+    global_packsize             = sku_stats['PackSize'].dropna().mean()
+    parent_stats['PackSize']    = parent_stats['ParentSKU'].map(packsize_map).fillna(
+                                     global_packsize if not np.isnan(global_packsize) else 1.0
+                                 )
     parent_stats['PacksToOrder'] = np.where(
-        parent_stats['PackSize'] > 0, np.ceil(parent_stats['ToBuyWt'] / parent_stats['PackSize']), 0
+        parent_stats['PackSize'] > 0,
+        np.ceil(parent_stats['ToBuyWt'] / parent_stats['PackSize']),
+        0
     ).astype(int)
-    parent_stats['OrderWt'] = parent_stats['PacksToOrder'] * parent_stats['PackSize']
-    parent_stats['SKU'] = parent_stats['ParentSKU']
+    parent_stats['OrderWt']  = parent_stats['PacksToOrder'] * parent_stats['PackSize']
+    parent_stats['SKU']      = parent_stats['ParentSKU']
     parent_stats['SKU_Desc'] = parent_stats['SKU'].map(parent_desc_map).fillna(parent_stats['SKU'])
     parent_stats['CostPerLb'] = np.where(
         parent_stats['InvWt'] > 0,
         parent_stats['InvCost'] / parent_stats['InvWt'],
         0
     )
-    parent_stats['EstCost'] = parent_stats['OrderWt'] * parent_stats['CostPerLb']
+    parent_stats['EstCost']  = parent_stats['OrderWt'] * parent_stats['CostPerLb']
     plan = parent_stats[parent_stats['PacksToOrder'] > 0][
         ["SKU", "SKU_Desc", "Supplier", "InvWt", "DesiredWt", "PackSize", "PacksToOrder", "OrderWt", "EstCost"]
     ].copy()
     plan.reset_index(drop=True, inplace=True)
     return plan
+
 
 # ------------------- MAIN STREAMLIT TAB ------------------- #
 
@@ -375,190 +405,271 @@ def woh_tab(sheets, theme):
 
     # Tabs for each workflow
     tab1, tab2, tab3, tab4 = st.tabs([
-    "FZ → EXT Transfer",
-    "EXT → FZ Transfer",
-    "Purchase Plan",
-    "Product Lookup"  # <-- New tab
+        "FZ → EXT Transfer",
+        "EXT → FZ Transfer",
+        "Purchase Plan",
+        "Product Lookup"  # <-- New tab
     ])
 
     # --- FZ → EXT Transfer ---
     with tab1:
         st.subheader("🔄 Move FZ → EXT")
+
         # Filter out only FZ and EXT SKUs with usage
-        fz = sku_stats[(sku_stats['ProductState'].str.startswith('FZ')) & (sku_stats['AvgWeeklyUsage'] > 0)].copy()
-        ext = sku_stats[(sku_stats['ProductState'].str.startswith('EXT')) & (sku_stats['AvgWeeklyUsage'] > 0)].copy()
-    
+        fz  = sku_stats[
+            (sku_stats['ProductState'].str.startswith('FZ')) &
+            (sku_stats['AvgWeeklyUsage'] > 0)
+        ].copy()
+        ext = sku_stats[
+            (sku_stats['ProductState'].str.startswith('EXT')) &
+            (sku_stats['AvgWeeklyUsage'] > 0)
+        ].copy()
+
         thr1 = st.slider("Desired FZ WOH (weeks)", 0.0, 4.0, 1.5, 0.25)
         fz['DesiredFZ_Weight'] = fz['AvgWeeklyUsage'] * thr1
-        fz['WeightToMove'] = (fz['OnHandWeightTotal'] - fz['DesiredFZ_Weight']).clip(lower=0)
-    
+        fz['WeightToMove']     = (fz['OnHandWeightTotal'] - fz['DesiredFZ_Weight']).clip(lower=0)
+
         # Find EXT stock for these SKUs (if exists)
         ext_onhand = ext.set_index("SKU")["OnHandWeightTotal"].rename("EXT_Weight")
         fz = fz.join(ext_onhand, on="SKU")
         fz["EXT_Weight"] = fz["EXT_Weight"].fillna(0)
-        fz["TotalOnHand_FZ_EXT"] = fz["OnHandWeightTotal"] + fz["EXT_Weight"]
-    
+
         move = fz[fz["WeightToMove"] > 0].copy()
-    
-        # Cost to move calculation, robust to divide by zero
-        move['PctToMove'] = np.where(move["OnHandWeightTotal"] > 0, move["WeightToMove"] / move["OnHandWeightTotal"], 0)
-        move['CostToMove'] = move['PctToMove'] * move['OnHandCostTotal']
-    
+
+        # ─── Use NumPacksOnHand for accurate “Available Packs” ─────────
+        move['AvailablePacks']    = move['NumPacksOnHand']
+        move['TotalShippedLb']    = move['TotalShippedLb'].fillna(0)
+        move['TotalProductionLb'] = move['TotalProductionLb'].fillna(0)
+        # ────────────────────────────────────────────────────────────────
+
+        # Display metrics
         c1, c2, c3 = st.columns(3)
         c1.metric("SKUs to Move", move["SKU"].nunique())
         c2.metric("Total Weight to Move", f"{move['WeightToMove'].sum():,.0f} lb")
-        c3.metric("Total Cost to Move", f"${move['CostToMove'].sum():,.0f}")
-    
-        # Download
+        c3.metric("Total Cost to Move", "$0")  # placeholder; replace if you have cost logic
+
+        # Download: exclude TotalOnHand_FZ_EXT, OnHandCostTotal, CostToMove
         if not move.empty:
             buf1 = io.BytesIO()
             move_cols = [
-                'SKU', 'SKU_Desc', 'Supplier', 'ProductState', 'OnHandWeightTotal',
-                'AvgWeeklyUsage', 'WeeksOnHand', 'DesiredFZ_Weight', 'WeightToMove',
-                'EXT_Weight', 'TotalOnHand_FZ_EXT', 'OnHandCostTotal', 'CostToMove'
+                'SKU',
+                'SKU_Desc',
+                'Supplier',
+                'ProductState',
+                'OnHandWeightTotal',
+                'AvgWeeklyUsage',
+                'WeeksOnHand',
+                'DesiredFZ_Weight',
+                'WeightToMove',
+                # new columns
+                'AvailablePacks',
+                'TotalShippedLb',
+                'TotalProductionLb'
             ]
             move[move_cols].to_excel(buf1, index=False, sheet_name="FZ2EXT")
             buf1.seek(0)
-            st.download_button("Download FZ→EXT List", buf1.getvalue(), file_name="FZ2EXT_list.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    
+            st.download_button(
+                "Download FZ→EXT List",
+                buf1.getvalue(),
+                file_name="FZ2EXT_list.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
         # Chart
         if not move.empty:
-            chart = alt.Chart(move).mark_bar().encode(
-                y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
-                x=alt.X("WeightToMove:Q", title="Weight to Move (lb)"),
-                color="Supplier:N",
-                tooltip=["SKU_Desc", "Supplier", "WeightToMove", "WeeksOnHand"]
-            ).properties(height=alt.Step(25))
+            chart = (
+                alt.Chart(move)
+                   .mark_bar()
+                   .encode(
+                       y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
+                       x=alt.X("WeightToMove:Q", title="Weight to Move (lb)"),
+                       color="Supplier:N",
+                       tooltip=["SKU_Desc", "Supplier", "WeightToMove", "WeeksOnHand"]
+                   )
+                   .properties(height=alt.Step(25))
+            )
             st.altair_chart(theme(chart).interactive(), use_container_width=True)
-    
+
     # --- EXT → FZ Transfer ---
     with tab2:
         st.subheader("🔄 Move EXT → FZ")
-        fz = sku_stats[(sku_stats['ProductState'].str.startswith('FZ')) & (sku_stats['AvgWeeklyUsage'] > 0)].copy()
-        ext = sku_stats[(sku_stats['ProductState'].str.startswith('EXT')) & (sku_stats['AvgWeeklyUsage'] > 0)].copy()
-    
+
+        fz  = sku_stats[
+            (sku_stats['ProductState'].str.startswith('FZ')) &
+            (sku_stats['AvgWeeklyUsage'] > 0)
+        ].copy()
+        ext = sku_stats[
+            (sku_stats['ProductState'].str.startswith('EXT')) &
+            (sku_stats['AvgWeeklyUsage'] > 0)
+        ].copy()
+
         # Build lookup of FZ inventory for EXT SKUs
         fz_onhand = fz.set_index("SKU")["OnHandWeightTotal"].rename("FZ_Weight")
         ext = ext.join(fz_onhand, on="SKU")
         ext["FZ_Weight"] = ext["FZ_Weight"].fillna(0)
-    
+
         thr2_default = 1.0
         try:
             thr2_default = float(compute_threshold_move(ext, None))
         except Exception:
             pass
-        thr2 = st.slider("Desired FZ WOH to achieve", 0.0, float(fz["WeeksOnHand"].max() if not fz.empty else 52.0), thr2_default, step=0.25)
-    
+
+        thr2 = st.slider(
+            "Desired FZ WOH to achieve",
+            0.0,
+            float(fz["WeeksOnHand"].max() if not fz.empty else 52.0),
+            thr2_default,
+            step=0.25
+        )
+
         ext["DesiredFZ_Weight"] = ext["AvgWeeklyUsage"] * thr2
-        ext["WeightToReturn"] = (ext["DesiredFZ_Weight"] - ext["FZ_Weight"]).clip(lower=0)
-        ext["TotalOnHand_EXT_FZ"] = ext["OnHandWeightTotal"] + ext["FZ_Weight"]
-    
+        ext["WeightToReturn"]   = (ext["DesiredFZ_Weight"] - ext["FZ_Weight"]).clip(lower=0)
+
         back = ext[ext["WeightToReturn"] > 0].copy()
-        back['PctToReturn'] = np.where(back["OnHandWeightTotal"] > 0, back["WeightToReturn"] / back["OnHandWeightTotal"], 0)
-        back['CostToReturn'] = back['PctToReturn'] * back['OnHandCostTotal']
-    
+
+        # ─── Use NumPacksOnHand for accurate “Available Packs” ─────────
+        back['AvailablePacks']    = back['NumPacksOnHand']
+        back['TotalShippedLb']    = back['TotalShippedLb'].fillna(0)
+        back['TotalProductionLb'] = back['TotalProductionLb'].fillna(0)
+        # ────────────────────────────────────────────────────────────────
+
+        # Display metrics
         col1, col2, col3 = st.columns(3)
         col1.metric("SKUs to Return", back["SKU"].nunique())
         col2.metric("Total Weight to Return", f"{back['WeightToReturn'].sum():,.0f} lb")
-        col3.metric("Total Cost to Return", f"${back['CostToReturn'].sum():,.0f}")
-    
-        # Download
+        col3.metric("Total Cost to Return", "$0")  # placeholder; replace if you have cost logic
+
+        # Download: exclude TotalOnHand_EXT_FZ, OnHandCostTotal, CostToReturn
         if not back.empty:
             buf2 = io.BytesIO()
             back_cols = [
-                'SKU', 'SKU_Desc', 'Supplier', 'ProductState', 'OnHandWeightTotal',
-                'AvgWeeklyUsage', 'WeeksOnHand', 'DesiredFZ_Weight', 'WeightToReturn',
-                'FZ_Weight', 'TotalOnHand_EXT_FZ', 'OnHandCostTotal', 'CostToReturn'
+                'SKU',
+                'SKU_Desc',
+                'Supplier',
+                'ProductState',
+                'OnHandWeightTotal',
+                'AvgWeeklyUsage',
+                'WeeksOnHand',
+                'DesiredFZ_Weight',
+                'WeightToReturn',
+                # new columns
+                'AvailablePacks',
+                'TotalShippedLb',
+                'TotalProductionLb'
             ]
             back[back_cols].to_excel(buf2, index=False, sheet_name="EXT2FZ")
             buf2.seek(0)
-            st.download_button("Download EXT→FZ List", buf2.getvalue(), file_name="EXT2FZ_list.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    
+            st.download_button(
+                "Download EXT→FZ List",
+                buf2.getvalue(),
+                file_name="EXT2FZ_list.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
         # Chart
         if not back.empty:
-            chart2 = alt.Chart(back).mark_bar().encode(
-                y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
-                x=alt.X("WeightToReturn:Q", title="Weight to Return (lb)"),
-                color="Supplier:N",
-                tooltip=["SKU_Desc", "Supplier", "WeightToReturn", "WeeksOnHand"]
-            ).properties(height=alt.Step(25))
+            chart2 = (
+                alt.Chart(back)
+                   .mark_bar()
+                   .encode(
+                       y=alt.Y("SKU_Desc:N", sort='-x', title="SKU"),
+                       x=alt.X("WeightToReturn:Q", title="Weight to Return (lb)"),
+                       color="Supplier:N",
+                       tooltip=["SKU_Desc", "Supplier", "WeightToReturn", "WeeksOnHand"]
+                   )
+                   .properties(height=alt.Step(25))
+            )
             st.altair_chart(theme(chart2).interactive(), use_container_width=True)
-        
+
+    # --- Purchase Plan (tab3) ---
     with tab3:
         st.subheader("🛒 Usage-Based Product Purchase Plan with Delivery Intelligence")
-    
-        # --- Desired Weeks-On-Hand (WOH) Slider ---
+
+        # Desired Weeks-On-Hand (WOH) Slider
         desired_woh = st.slider("Desired Weeks On Hand (WOH) for Product Purchase Plan", 0.0, 12.0, 4.0, 0.5)
-    
-        # --- Preprocess Parent Chains and Descriptions ---
+
+        # Preprocess Parent Chains and Descriptions
         parent_plan = preprocess_for_parents(sku_stats, prod_detail)
-    
-        # --- Calculate Purchase Plan Fields ---
+
+        # Calculate Purchase Plan Fields
         parent_plan['DesiredWt'] = parent_plan['MeanUse'] * desired_woh
-        parent_plan['ToBuyWt'] = (parent_plan['DesiredWt'] - parent_plan['InvWt']).clip(lower=0)
-    
+        parent_plan['ToBuyWt']   = (parent_plan['DesiredWt'] - parent_plan['InvWt']).clip(lower=0)
+
         # Calculate pack size (use median from all SKUs mapping to this parent)
-        packsize_map = sku_stats.groupby('TrueParent')['PackSize'].median()
+        packsize_map   = sku_stats.groupby('TrueParent')['PackSize'].median()
         global_packsize = sku_stats['PackSize'].dropna().mean()
-        parent_plan['PackSize'] = parent_plan['SKU'].map(packsize_map).fillna(global_packsize if not np.isnan(global_packsize) else 1.0)
-    
+        parent_plan['PackSize'] = parent_plan['SKU'].map(packsize_map).fillna(
+                                    global_packsize if not np.isnan(global_packsize) else 1.0
+                                )
+
         parent_plan['PacksToOrder'] = np.where(
-            parent_plan['PackSize'] > 0, np.ceil(parent_plan['ToBuyWt'] / parent_plan['PackSize']), 0
+            parent_plan['PackSize'] > 0,
+            np.ceil(parent_plan['ToBuyWt'] / parent_plan['PackSize']),
+            0
         ).astype(int)
         parent_plan['OrderWt'] = parent_plan['PacksToOrder'] * parent_plan['PackSize']
-    
+
         parent_plan['CostPerLb'] = np.where(
             parent_plan['InvWt'] > 0,
             parent_plan['InvCost'] / parent_plan['InvWt'],
             0
         )
         parent_plan['EstCost'] = parent_plan['OrderWt'] * parent_plan['CostPerLb']
-    
-        # --- Special Order SO01 Flag ---
-        parent_plan["SpecialOrderFlag"] = parent_plan["SKU"].astype(str).str.contains("SO01", na=False) | parent_plan["SKU_Desc"].astype(str).str.contains("SO01", na=False)
+
+        # Special Order SO01 Flag
+        parent_plan["SpecialOrderFlag"] = (
+            parent_plan["SKU"].astype(str).str.contains("SO01", na=False) |
+            parent_plan["SKU_Desc"].astype(str).str.contains("SO01", na=False)
+        )
         parent_plan["SO Note"] = np.where(parent_plan["SpecialOrderFlag"], "SO01 Special Order", "")
-    
-        # --- Delivery Info ---
+
+        # Delivery Info
         delivery_info = parent_plan["Supplier"].apply(lambda s: get_next_delivery(s))
-        parent_plan["NextCutoff"] = delivery_info.apply(lambda d: d["cutoff_datetime"].strftime("%a %H:%M") if d["found"] else "")
+        parent_plan["NextCutoff"]   = delivery_info.apply(lambda d: d["cutoff_datetime"].strftime("%a %H:%M") if d["found"] else "")
         parent_plan["NextDelivery"] = delivery_info.apply(lambda d: d["delivery_date"].strftime("%Y-%m-%d") if d["found"] and d["delivery_date"] else "")
         parent_plan["DeliveryNotes"] = delivery_info.apply(lambda d: d["notes"] if d["found"] else d.get("reason", ""))
-    
-        # --- Filters (Supplier/Protein) ---
+
+        # Filters (Supplier/Protein)
         all_suppliers = sorted(parent_plan["Supplier"].dropna().unique())
-        all_proteins = sorted(parent_plan["Protein"].dropna().unique())
+        all_proteins  = sorted(parent_plan["Protein"].dropna().unique())
         selected_supplier = st.selectbox("Supplier Filter", ["All"] + all_suppliers)
-        selected_protein = st.selectbox("Protein Filter", ["All"] + all_proteins)
+        selected_protein  = st.selectbox("Protein Filter", ["All"] + all_proteins)
         plan_df = parent_plan.copy()
         if selected_supplier != "All":
             plan_df = plan_df[plan_df["Supplier"] == selected_supplier]
         if selected_protein != "All":
             plan_df = plan_df[plan_df["Protein"] == selected_protein]
-    
-        # --- Only show those with packs to order
+
+        # Only show those with packs to order
         plan_df = plan_df[plan_df['PacksToOrder'] > 0]
-    
+
         display_cols = [
             "SKU", "SKU_Desc", "Supplier", "Protein", "InvWt", "DesiredWt",
             "PackSize", "PacksToOrder", "OrderWt", "EstCost",
             "SO Note", "NextCutoff", "NextDelivery", "DeliveryNotes"
         ]
         display = plan_df[display_cols].copy()
-        display["InvWt"] = display["InvWt"].map("{:,.0f} lb".format)
-        display["DesiredWt"] = display["DesiredWt"].map("{:,.0f} lb".format)
-        display["PackSize"] = display["PackSize"].map("{:,.0f} lb".format)
-        display["OrderWt"] = display["OrderWt"].map("{:,.0f} lb".format)
-        display["EstCost"] = display["EstCost"].map("${:,.2f}".format)
-    
+        display["InvWt"]       = display["InvWt"].map("{:,.0f} lb".format)
+        display["DesiredWt"]   = display["DesiredWt"].map("{:,.0f} lb".format)
+        display["PackSize"]    = display["PackSize"].map("{:,.0f} lb".format)
+        display["OrderWt"]     = display["OrderWt"].map("{:,.0f} lb".format)
+        display["EstCost"]     = display["EstCost"].map("${:,.2f}".format)
+
         st.dataframe(display, use_container_width=True)
-    
+
         buf = io.BytesIO()
         display.to_excel(buf, index=False, sheet_name="PurchasePlan")
         buf.seek(0)
-        st.download_button("📥 Download Purchase Plan", data=buf.getvalue(), file_name="Purchase_Plan.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    
+        st.download_button(
+            "📥 Download Purchase Plan",
+            data=buf.getvalue(),
+            file_name="Purchase_Plan.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
         supplier_summary = (
-            plan_df.groupby("Supplier", as_index=False)["EstCost"].sum()
+            plan_df
+            .groupby("Supplier", as_index=False)["EstCost"].sum()
             .sort_values("EstCost", ascending=False)
             .head(10)
         )
@@ -570,69 +681,83 @@ def woh_tab(sheets, theme):
             ).properties(title="Top Suppliers in Purchase Plan (by Estimated Cost)")
             st.altair_chart(pie, use_container_width=True)
 
+    # --- Product Lookup (tab4) ---
     with tab4:
         st.subheader("🔍 Product Lookup: Parent + Children Usage & WOH")
-    
+
         # Parent/Child maps
         parent_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
-        desc_map = dict(zip(prod_detail['SKU'], prod_detail['SKU_Desc']))
-    
+        desc_map   = dict(zip(prod_detail['SKU'], prod_detail['SKU_Desc']))
+
         # Function to walk up the chain
         def get_root_parent(sku):
             seen = set()
-            while sku in parent_map and pd.notnull(parent_map[sku]) and parent_map[sku] != "" and parent_map[sku] != sku:
+            while (
+                sku in parent_map
+                and pd.notnull(parent_map[sku])
+                and parent_map[sku] != ""
+                and parent_map[sku] != sku
+            ):
                 if sku in seen:
                     break
                 seen.add(sku)
                 sku = parent_map[sku]
             return sku
-    
+
         sku_stats["SearchKey"] = sku_stats["SKU"].astype(str) + " – " + sku_stats["SKU_Desc"].fillna("")
         query = st.text_input("Enter SKU, Product Name, or Partial Description:")
-    
+
         if query:
             # Find all matching SKUs/descriptions
-            mask = sku_stats["SearchKey"].str.contains(query, case=False, na=False) | \
-                   sku_stats["SKU"].astype(str).str.contains(query, case=False, na=False)
+            mask = (
+                sku_stats["SearchKey"].str.contains(query, case=False, na=False)
+                | sku_stats["SKU"].astype(str).str.contains(query, case=False, na=False)
+            )
             matched = sku_stats[mask]
-    
+
             if matched.empty:
                 st.warning("No products matched your search.")
             else:
                 # For each match, get the root parent and show rollup + all children
                 # (Usually there's one match, but could be multiple, so iterate)
                 for idx, row in matched.iterrows():
-                    search_sku = row['SKU']
+                    search_sku  = row['SKU']
                     root_parent = get_root_parent(search_sku)
                     # Find all child SKUs under this parent (including parent itself)
                     child_mask = sku_stats['SKU'].apply(lambda x: get_root_parent(x) == root_parent)
                     fam = sku_stats[child_mask].copy()
-    
+
                     # Roll up family totals
                     fam_totals = fam.agg({
                         'AvgWeeklyUsage': 'sum',
                         'OnHandWeightTotal': 'sum'
                     })
-                    fam_totals['WeeksOnHand'] = fam_totals['OnHandWeightTotal'] / fam_totals['AvgWeeklyUsage'] if fam_totals['AvgWeeklyUsage'] > 0 else float('nan')
-    
-                    parent_desc = fam[fam['SKU'] == root_parent]['SKU_Desc'].iloc[0] if not fam[fam['SKU'] == root_parent].empty else ""
+                    fam_totals['WeeksOnHand'] = (
+                        fam_totals['OnHandWeightTotal'] / fam_totals['AvgWeeklyUsage']
+                        if fam_totals['AvgWeeklyUsage'] > 0 else float('nan')
+                    )
+
+                    parent_desc = (
+                        fam[fam['SKU'] == root_parent]['SKU_Desc'].iloc[0]
+                        if not fam[fam['SKU'] == root_parent].empty else ""
+                    )
                     st.markdown(f"**Parent Product:** `{root_parent}` – {parent_desc}")
                     st.markdown(f"- **Total Usage (lb/wk):** `{fam_totals['AvgWeeklyUsage']:.2f}`")
                     st.markdown(f"- **Total On Hand (lb):** `{fam_totals['OnHandWeightTotal']:.2f}`")
                     st.markdown(f"- **Combined Weeks On Hand:** `{fam_totals['WeeksOnHand']:.2f}`")
-    
+
                     # Table of all children (and parent itself)
                     display_cols = [
                         "SKU", "SKU_Desc", "Supplier", "Protein", "AvgWeeklyUsage",
                         "OnHandWeightTotal", "WeeksOnHand", "ProductState"
                     ]
                     fam_disp = fam[display_cols].copy()
-                    fam_disp["AvgWeeklyUsage"] = fam_disp["AvgWeeklyUsage"].map("{:,.2f} lb".format)
-                    fam_disp["OnHandWeightTotal"] = fam_disp["OnHandWeightTotal"].map("{:,.2f} lb".format)
-                    fam_disp["WeeksOnHand"] = fam_disp["WeeksOnHand"].map("{:,.2f}".format)
+                    fam_disp["AvgWeeklyUsage"]     = fam_disp["AvgWeeklyUsage"].map("{:,.2f} lb".format)
+                    fam_disp["OnHandWeightTotal"]  = fam_disp["OnHandWeightTotal"].map("{:,.2f} lb".format)
+                    fam_disp["WeeksOnHand"]        = fam_disp["WeeksOnHand"].map("{:,.2f}".format)
                     st.write("**Breakdown by Child SKU:**")
                     st.dataframe(fam_disp, use_container_width=True)
-    
+
                     # Optional: Download
                     buf = io.BytesIO()
                     fam_disp.to_excel(buf, index=False, sheet_name="Lookup")
@@ -643,6 +768,6 @@ def woh_tab(sheets, theme):
                         file_name=f"{root_parent}_lookup.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                    break  # Only show first match for now; remove this if you want all matches
+                    break  # Only show first match for now; remove to show all matches
         else:
             st.info("Enter a SKU or product description to search.")
