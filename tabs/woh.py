@@ -256,13 +256,13 @@ def aggregate_data(sheets, weeks_override=None):
     # Add PackSize from the aggregated packsize_map
     sku_stats["PackSize"] = sku_stats["SKU"].map(packsize_map)
 
-    # Compute NumPacksOnHand per state via floor division
+    # Compute NumPacksOnHand per state via rounding to nearest integer
     def compute_state_packs(row):
         ps = row["PackSize"]
         w  = row["OnHandWeightTotal"]
         if pd.isna(ps) or ps <= 0 or w <= 0:
             return 0
-        return int(w // ps)
+        return int(round(w / ps))
 
     sku_stats["NumPacksOnHand"] = sku_stats.apply(compute_state_packs, axis=1)
 
@@ -797,3 +797,14 @@ def woh_tab(sheets, theme):
                     break  # Only show first match for now
         else:
             st.info("Enter a SKU or product description to search.")
+
+    # ─── Pack Tracking Debug ────────────────────────────────────────────────────
+    with st.expander("🔍 Pack Count Tracking (Cost Sheet vs Inventory)"):
+        # Cost sheet total packs per SKU
+        packs_cost = cost_val.groupby("SKU")["NumPacks"].sum().reset_index(name="CostSheet_TotalPacks")
+        # Inventory total packs per SKU (sum of NumPacksOnHand across states)
+        inv_packs = sku_stats.groupby("SKU")["NumPacksOnHand"].sum().reset_index(name="Inv_TotalPacks")
+        # Merge and show difference
+        pack_track = packs_cost.merge(inv_packs, on="SKU", how="outer").fillna(0)
+        pack_track["Difference"] = pack_track["CostSheet_TotalPacks"] - pack_track["Inv_TotalPacks"]
+        st.dataframe(pack_track, use_container_width=True)
