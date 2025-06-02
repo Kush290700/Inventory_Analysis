@@ -267,10 +267,17 @@ def aggregate_data(sheets, weeks_override=None):
     )
     sku_stats.loc[mask, "ParentSKU"] = sku_stats.loc[mask, "SKU"]
 
-    # ─── Sum up NumPacks from cost_val and join into sku_stats ───────────────
+    # ─── Sum up NumPacks by (SKU, ProductState) and join into sku_stats ───────────────
+    #     This ensures packs-on-hand is state-specific rather than aggregated across all states.
     try:
-        packs_sum    = cost_val.groupby('SKU')['NumPacks'].sum()
-        sku_stats['NumPacksOnHand'] = sku_stats['SKU'].map(packs_sum).fillna(0).astype(int)
+        packs_state = cost_val.groupby(['SKU', 'ProductState'])['NumPacks'].sum()
+        # Convert to a dictionary keyed by (SKU,ProductState)
+        packs_state_map = packs_state.to_dict()
+        # Map each row in sku_stats to its own (SKU,ProductState)
+        sku_stats['NumPacksOnHand'] = sku_stats.apply(
+            lambda r: packs_state_map.get((r['SKU'], r['ProductState']), 0),
+            axis=1
+        ).astype(int)
     except Exception:
         sku_stats['NumPacksOnHand'] = 0
     # ────────────────────────────────────────────────────────────────────────
@@ -429,8 +436,8 @@ def woh_tab(sheets, theme):
         ext_onhand_packs = ext.set_index("SKU")["NumPacksOnHand"].rename("EXT_NumPacksOnHand")
         fz = fz.join(ext_onhand_wt,    on="SKU")
         fz = fz.join(ext_onhand_packs, on="SKU")
-        fz["EXT_OnHandWeight"]    = fz["EXT_OnHandWeight"].fillna(0)
-        fz["EXT_NumPacksOnHand"]  = fz["EXT_NumPacksOnHand"].fillna(0).astype(int)
+        fz["EXT_OnHandWeight"]   = fz["EXT_OnHandWeight"].fillna(0)
+        fz["EXT_NumPacksOnHand"] = fz["EXT_NumPacksOnHand"].fillna(0).astype(int)
 
         # Compute combined on-hand weight and combined packs for each SKU
         fz["Total_OnHandWeight"] = fz["OnHandWeightTotal"] + fz["EXT_OnHandWeight"]
@@ -443,14 +450,14 @@ def woh_tab(sheets, theme):
         move = fz[fz["WeightToMove"] > 0].copy()
 
         # ─── Use FZ & EXT on-hand weight & packs, plus totals ────────────────
-        move['FZ_OnHandWeight']         = move['OnHandWeightTotal']
-        move['FZ_PacksOnHand']          = move['NumPacksOnHand']
-        move['EXT_OnHandWeight']        = move['EXT_OnHandWeight']
-        move['EXT_PacksOnHand']         = move['EXT_NumPacksOnHand']
-        move['Total_OnHandWeight']      = move['Total_OnHandWeight']
-        move['Total_PacksOnHand']       = move['Total_PacksOnHand']
-        move['TotalShippedLb']          = move['TotalShippedLb'].fillna(0)
-        move['TotalProductionLb']       = move['TotalProductionLb'].fillna(0)
+        move['FZ_OnHandWeight']    = move['OnHandWeightTotal']
+        move['FZ_PacksOnHand']     = move['NumPacksOnHand']
+        move['EXT_OnHandWeight']   = move['EXT_OnHandWeight']
+        move['EXT_PacksOnHand']    = move['EXT_NumPacksOnHand']
+        move['Total_OnHandWeight'] = move['Total_OnHandWeight']
+        move['Total_PacksOnHand']  = move['Total_PacksOnHand']
+        move['TotalShippedLb']     = move['TotalShippedLb'].fillna(0)
+        move['TotalProductionLb']  = move['TotalProductionLb'].fillna(0)
         # ─────────────────────────────────────────────────────────────────────
 
         # Display metrics
