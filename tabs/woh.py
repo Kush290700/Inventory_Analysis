@@ -256,6 +256,15 @@ def aggregate_data(sheets, weeks_override=None):
     # Add PackSize from the aggregated packsize_map
     sku_stats["PackSize"] = sku_stats["SKU"].map(packsize_map)
 
+    # Now compute NumPacksOnHand per state by dividing that state's weight by pack size
+    def compute_state_packs(row):
+        ps = row["PackSize"]
+        if pd.isna(ps) or ps <= 0:
+            return 0
+        return int(np.floor(row["OnHandWeightTotal"] / ps))
+
+    sku_stats["NumPacksOnHand"] = sku_stats.apply(compute_state_packs, axis=1)
+
     # Add ParentSKU & possibly replace SKU_Desc with more detailed description
     desc_map   = dict(zip(prod_detail['SKU'], prod_detail['SKU_Desc']))
     parent_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
@@ -266,21 +275,6 @@ def aggregate_data(sheets, weeks_override=None):
         sku_stats["ParentSKU"].isna()
     )
     sku_stats.loc[mask, "ParentSKU"] = sku_stats.loc[mask, "SKU"]
-
-    # ─── Sum up NumPacks by (SKU, ProductState) and join into sku_stats ───────────────
-    #     This ensures packs-on-hand is state-specific rather than aggregated across all states.
-    try:
-        packs_state = cost_val.groupby(['SKU', 'ProductState'])['NumPacks'].sum()
-        # Convert to a dictionary keyed by (SKU,ProductState)
-        packs_state_map = packs_state.to_dict()
-        # Map each row in sku_stats to its own (SKU,ProductState)
-        sku_stats['NumPacksOnHand'] = sku_stats.apply(
-            lambda r: packs_state_map.get((r['SKU'], r['ProductState']), 0),
-            axis=1
-        ).astype(int)
-    except Exception:
-        sku_stats['NumPacksOnHand'] = 0
-    # ────────────────────────────────────────────────────────────────────────
 
     # Use Supplier from agg or product
     sku_stats['Supplier']     = sku_stats['Supplier'].replace("", "Unknown").fillna("Unknown")
@@ -414,7 +408,7 @@ def woh_tab(sheets, theme):
         "FZ → EXT Transfer",
         "EXT → FZ Transfer",
         "Purchase Plan",
-        "Product Lookup"  # <-- New tab
+        "Product Lookup"
     ])
 
     # --- FZ → EXT Transfer ---
@@ -751,7 +745,6 @@ def woh_tab(sheets, theme):
                 st.warning("No products matched your search.")
             else:
                 # For each match, get the root parent and show rollup + all children
-                # (Usually there's one match, but could be multiple, so iterate)
                 for idx, row in matched.iterrows():
                     search_sku  = row['SKU']
                     root_parent = get_root_parent(search_sku)
@@ -800,6 +793,6 @@ def woh_tab(sheets, theme):
                         file_name=f"{root_parent}_lookup.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                    break  # Only show first match for now; remove to show all matches
+                    break  # Only show first match for now
         else:
             st.info("Enter a SKU or product description to search.")
