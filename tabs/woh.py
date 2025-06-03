@@ -136,7 +136,7 @@ def aggregate_data(sheets, weeks_override=None):
     sales_df    = sheets.get('Sales History', pd.DataFrame()).copy()
     prod_df     = sheets.get('Production Batch', pd.DataFrame()).copy()
     prod_detail = sheets.get('Product Detail', pd.DataFrame()).copy()
-    inv1        = sheets.get('Inventory Detail1', pd.DataFrame()).copy()   # <— using "Inventory Detail1" now
+    inv1        = sheets.get('Inventory Detail1', pd.DataFrame()).copy()   # <— using "Inventory Detail1"
     cost_val    = sheets.get('Cost Value', pd.DataFrame()).copy()          # loaded but not used for pack logic
 
     #
@@ -172,17 +172,23 @@ def aggregate_data(sheets, weeks_override=None):
     prod_detail['SKU_Desc']  = prod_detail['Description'].fillna("").astype(str)
 
     # ---- NEW: Inventory Detail1 (inv1) ----
-    # Strip whitespace from column names first:
+    # Strip whitespace from column names first, so we catch "SKU1" without trailing spaces:
     inv1.columns = inv1.columns.str.strip()
 
-    # If the required columns exist, clean them. Otherwise, fallback to empty DataFrame.
-    if not inv1.empty and all(col in inv1.columns for col in ["SKU", "ProductState", "PackId1", "WeightLb"]):
+    # If "SKU1" exists, use that for the numeric SKU; otherwise fall back to any "SKU" column.
+    if not inv1.empty and 'SKU1' in inv1.columns and all(col in inv1.columns for col in ["ProductState", "PackId1", "WeightLb"]):
+        inv1['SKU']         = inv1['SKU1'].map(clean_sku)
+        inv1['ProductState']= inv1['ProductState'].astype(str).str.strip().str.upper()
+        inv1['PackId1']     = inv1['PackId1'].astype(str).str.strip()
+        inv1['WeightLb']    = pd.to_numeric(inv1['WeightLb'], errors='coerce').fillna(0)
+    elif not inv1.empty and 'SKU' in inv1.columns and all(col in inv1.columns for col in ["ProductState", "PackId1", "WeightLb"]):
+        # If your sheet only has "SKU" (which is not common in your example), use that.
         inv1['SKU']         = inv1['SKU'].map(clean_sku)
         inv1['ProductState']= inv1['ProductState'].astype(str).str.strip().str.upper()
-        inv1['PackId1']     = inv1['PackId1'].astype(str).str.strip().fillna('')
+        inv1['PackId1']     = inv1['PackId1'].astype(str).str.strip()
         inv1['WeightLb']    = pd.to_numeric(inv1['WeightLb'], errors='coerce').fillna(0)
     else:
-        # If "Inventory Detail1" is missing any required columns, treat it as empty
+        # If mandatory columns are missing, treat as empty
         inv1 = pd.DataFrame(columns=["SKU", "ProductState", "PackId1", "WeightLb"])
 
     # ---- Cost Value (cost_val) – still loaded (optional) ----
@@ -417,7 +423,7 @@ def compute_parent_purchase_plan(sku_stats, prod_detail, cost_val, desired_woh):
         sku_stats.groupby("ParentSKU", as_index=False)
                  .agg(
                      MeanUse  = ('AvgWeeklyUsage', 'sum'),
-                     InvWt    = ('OnHandWeightTotal', 'sum'),
+                     InvWt    = ('OnHandWeightTotal','sum'),
                      InvCost  = ('OnHandCostTotal',   'sum'),
                      Supplier = ('Supplier', lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0])
                  )
@@ -425,7 +431,7 @@ def compute_parent_purchase_plan(sku_stats, prod_detail, cost_val, desired_woh):
     parent_stats['DesiredWt']   = parent_stats['MeanUse'] * desired_woh
     parent_stats['ToBuyWt']     = (parent_stats['DesiredWt'] - parent_stats['InvWt']).clip(lower=0)
 
-    # Derive packsize per ParentSKU: median of (OnHandWeightTotal ÷ NumPacksOnHand) across its children
+    # Derive packsize per ParentSKU: median of (OnHandWeightTotal ÷ NumPacksOnHand) among its children
     child_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
     packsize_map_per_child = dict(
         zip(
@@ -479,7 +485,7 @@ def woh_tab(sheets, theme):
       - "Sales History"
       - "Production Batch"
       - "Product Detail"
-      - "Inventory Detail1"   ← used for exact pack counts
+      - "Inventory Detail1"   ← used for exact pack counts (SKU1 → SKU)
       - "Cost Value"          ← (not used for pack counts in this version)
     """
     st.header("📦 Advanced Inventory Weeks-On-Hand (WOH) Dashboard")
