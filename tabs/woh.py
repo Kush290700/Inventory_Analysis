@@ -1,3 +1,5 @@
+# tabs/woh.py
+
 import io
 import os
 import sys
@@ -122,7 +124,7 @@ def calculate_weeks_in_data(sales_df):
 def aggregate_data(sheets, weeks_override=None):
     """
     Returns:
-      sku_stats      → DataFrame with one row per (SKU, Supplier, Protein, Description, 
+      sku_stats      → DataFrame with one row per (SKU, Supplier, Protein, Description,
                          ProductState, ProductName), plus computed metrics, plus NumPacksOnHand
       prod_detail    → raw “Product Detail” (for lookups)
       cost_val       → raw “Cost Value” (unused for pack logic now)
@@ -134,8 +136,8 @@ def aggregate_data(sheets, weeks_override=None):
     sales_df    = sheets.get('Sales History', pd.DataFrame()).copy()
     prod_df     = sheets.get('Production Batch', pd.DataFrame()).copy()
     prod_detail = sheets.get('Product Detail', pd.DataFrame()).copy()
-    inv1        = sheets.get('Inventory Detail1', pd.DataFrame()).copy()   # <— now using "Inventory Detail1"
-    cost_val    = sheets.get('Cost Value', pd.DataFrame()).copy()          # still loaded but not used for packs
+    inv1        = sheets.get('Inventory Detail1', pd.DataFrame()).copy()   # <— using "Inventory Detail1" now
+    cost_val    = sheets.get('Cost Value', pd.DataFrame()).copy()          # loaded but not used for pack logic
 
     #
     # ── 1) CLEAN & NORMALIZE ALL DATAFRAMES ────────────────────────────────────
@@ -170,24 +172,29 @@ def aggregate_data(sheets, weeks_override=None):
     prod_detail['SKU_Desc']  = prod_detail['Description'].fillna("").astype(str)
 
     # ---- NEW: Inventory Detail1 (inv1) ----
-    #    We only need {SKU, ProductState, PackId1, WeightLb} from this sheet.
+    # Strip whitespace from column names first:
+    inv1.columns = inv1.columns.str.strip()
+
+    # If the required columns exist, clean them. Otherwise, fallback to empty DataFrame.
     if not inv1.empty and all(col in inv1.columns for col in ["SKU", "ProductState", "PackId1", "WeightLb"]):
         inv1['SKU']         = inv1['SKU'].map(clean_sku)
-        inv1['ProductState']= inv1['ProductState'].str.upper().fillna('')
+        inv1['ProductState']= inv1['ProductState'].astype(str).str.strip().str.upper()
         inv1['PackId1']     = inv1['PackId1'].astype(str).str.strip().fillna('')
         inv1['WeightLb']    = pd.to_numeric(inv1['WeightLb'], errors='coerce').fillna(0)
     else:
-        # If "Inventory Detail1" is missing required columns, replace with an empty DataFrame
+        # If "Inventory Detail1" is missing any required columns, treat it as empty
         inv1 = pd.DataFrame(columns=["SKU", "ProductState", "PackId1", "WeightLb"])
 
-    # ---- Cost Value (cost_val) – still loaded but not used for pack logic now ----
-    cost_val['SKU']      = cost_val['SKU'].map(clean_sku) if 'SKU' in cost_val else cost_val.get('SKU', pd.Series()).map(clean_sku)
-    if 'NumPacks' in cost_val and 'WeightLb' in cost_val:
+    # ---- Cost Value (cost_val) – still loaded (optional) ----
+    if 'SKU' in cost_val.columns:
+        cost_val['SKU']      = cost_val['SKU'].map(clean_sku)
+    if 'NumPacks' in cost_val.columns:
         cost_val['NumPacks'] = pd.to_numeric(cost_val['NumPacks'], errors='coerce').fillna(0)
+    if 'WeightLb' in cost_val.columns:
         cost_val['WeightLb'] = pd.to_numeric(cost_val['WeightLb'], errors='coerce').fillna(0)
 
     #
-    # ── 2) AGGREGATE SALES & INVENTORY (weight & cost), exactly as before ─────
+    # ── 2) AGGREGATE SALES & INVENTORY (weight & cost) ─────────────────────────
     #
 
     # 2a) AGGREGATE SALES → one row per (SKU, Supplier, Protein, Description)
@@ -367,7 +374,7 @@ def preprocess_for_parents(sku_stats, prod_detail):
     sku_stats['SKU_Desc']   = sku_stats['SKU'].map(desc_map).fillna(sku_stats['SKU_Desc'])
 
     agg_dict = {
-        'MeanUse':  ('AvgWeeklyUsage',  'sum'),
+        'MeanUse':  ('AvgWeeklyUsage',   'sum'),
         'InvWt':    ('OnHandWeightTotal','sum'),
         'InvCost':  ('OnHandCostTotal',  'sum'),
         'Supplier': ('Supplier',         lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0]),
@@ -418,7 +425,7 @@ def compute_parent_purchase_plan(sku_stats, prod_detail, cost_val, desired_woh):
     parent_stats['DesiredWt']   = parent_stats['MeanUse'] * desired_woh
     parent_stats['ToBuyWt']     = (parent_stats['DesiredWt'] - parent_stats['InvWt']).clip(lower=0)
 
-    # Derive packsize per ParentSKU: median of child pack sizes
+    # Derive packsize per ParentSKU: median of (OnHandWeightTotal ÷ NumPacksOnHand) across its children
     child_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
     packsize_map_per_child = dict(
         zip(
@@ -472,11 +479,13 @@ def woh_tab(sheets, theme):
       - "Sales History"
       - "Production Batch"
       - "Product Detail"
-      - "Inventory Detail1"  ← used for exact pack counts
-      - "Cost Value"         ← (not used for pack counts in this version)
+      - "Inventory Detail1"   ← used for exact pack counts
+      - "Cost Value"          ← (not used for pack counts in this version)
     """
     st.header("📦 Advanced Inventory Weeks-On-Hand (WOH) Dashboard")
 
+    # aggregate_data now returns five objects:
+    #    sku_stats, prod_detail, cost_val, total_packs, inv1_pack_sum
     sku_stats, prod_detail, cost_val, total_packs, inv1_pack_sum = aggregate_data(sheets)
 
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -682,7 +691,7 @@ def woh_tab(sheets, theme):
         parent_plan['DesiredWt'] = parent_plan['MeanUse'] * desired_woh
         parent_plan['ToBuyWt']   = (parent_plan['DesiredWt'] - parent_plan['InvWt']).clip(lower=0)
 
-        # Derive packsize per ParentSKU: median of child pack sizes
+        # Derive packsize per ParentSKU: median of (OnHandWeightTotal ÷ NumPacksOnHand) among its children
         child_map = dict(zip(prod_detail['SKU'], prod_detail['ParentSKU']))
         packsize_map_per_child = dict(
             zip(
@@ -816,8 +825,8 @@ def woh_tab(sheets, theme):
                 for idx, row in matched.iterrows():
                     search_sku  = row['SKU']
                     root_parent = get_root_parent(search_sku)
-                    child_mask = sku_stats['SKU'].apply(lambda x: get_root_parent(x) == root_parent)
-                    fam = sku_stats[child_mask].copy()
+                    child_mask  = sku_stats['SKU'].apply(lambda x: get_root_parent(x) == root_parent)
+                    fam         = sku_stats[child_mask].copy()
 
                     fam_totals = fam.agg({
                         'AvgWeeklyUsage':       'sum',
